@@ -1,79 +1,154 @@
 # Salesforce Connected App Setup Guide
 
-This guide walks you through creating a Salesforce Connected App for the MCP Data Cloud Server.
+This guide walks you through creating a Salesforce Connected App that the Data Cloud MCP server uses to authenticate via OAuth 2.0 with PKCE.
+
+**Time required**: ~10 minutes
+
+---
 
 ## Prerequisites
 
-- Access to a Salesforce org with appropriate permissions
+- Admin access to a Salesforce org (or a user with "Manage Connected Apps" permission)
+- The org must have **Data Cloud** enabled
 
-## Step-by-Step Setup
+---
 
-### 1. Enable External Client Apps
+## Step 1: Enable External Client Apps
 
-1. Login to Salesforce → Setup → Search for "External Client Apps" using Quick Find
-2. Under "External Client Apps" on the left pane, choose 'Settings'
-3. Enable the following options:
+1. Log in to your Salesforce org
+2. Click the **gear icon** (top right) > **Setup**
+3. In the **Quick Find** box (left sidebar), type: `External Client Apps`
+4. Click **Settings** under "External Client Apps"
+5. Enable **both** toggles:
    - "Allow access to External Client App consumer secrets via REST API"
    - "Allow creation of connected apps"
-4. Click "Save"
+6. Click **Save**
 
-### 2. Create New Connected App
+---
 
-1. Click "New Connected App"
-2. Fill in the basic information:
-   - **Connected App Name**: MCP
-   - **API Name**: MCP (or use the default pre-populated value)
-   - **Contact Email**: Your email address
+## Step 2: Create the Connected App
 
-### 3. Configure OAuth Settings
+1. In Setup, navigate to **External Client Apps** (left sidebar)
+2. Click **New Connected App**
+3. Fill in the basic info:
 
-1. Under the "API" heading, check the box for "Enable OAuth Settings"
-2. **Callback URL**: 
-   - `http://localhost:55556/Callback`
-    Please DO NOT use port 55555 as this may run into issues. 
+| Field | Value |
+|---|---|
+| Connected App Name | `Data Cloud MCP` |
+| API Name | `Data_Cloud_MCP` (auto-populated) |
+| Contact Email | Your email address |
 
-3. **OAuth Scopes**: Add all of the scopes.
+4. Click **Next** or scroll to the OAuth section
 
-4. **Security Settings**:
-   - Require Secret for Web Server Flow: **true**
-   - Require Secret for Refresh Token Flow: **true**
-   - Require Proof Key for Code Exchange (PKCE) extension for Supported Authorization Flows: **true**
+---
 
+## Step 3: Enable and Configure OAuth
 
-5. Click "Save" and note down the Consumer Key and Secret
+1. Check the box: **"Enable OAuth Settings"**
 
-### 4. Configure OAuth Policies
+2. Set the **Callback URL** to exactly:
+   ```
+   http://localhost:55556/Callback
+   ```
+   > **Warning**: Do NOT use port `55555` — it conflicts with macOS AirPlay Receiver and other services. Port `55556` is safe.
 
-1. At the top of your newly created connected app, click "Manage"
-2. Navigate to Policies → OAuth policies
-3. Select "Edit Policies"
-4. Change "IP Relaxation" to "Relax IP restrictions"
-5. Click "Save"
+3. Add the following **OAuth Scopes** (click "Add" for each one):
 
-### 5. Enable Password Flow (Optional)
+   | Scope | Why it's needed |
+   |---|---|
+   | `Access the identity URL service (id, profile, email, address, phone)` | User identity during OAuth |
+   | `Manage user data via APIs (api)` | General REST API access |
+   | `Manage Data Cloud profile data (cdp_profile_api)` | Data Cloud Connect API (streams, segments, etc.) |
+   | `Perform ANSI SQL queries on Data Cloud data (cdp_query_api)` | SQL queries against Data Cloud |
+   | `Perform requests at any time (refresh_token, offline_access)` | Keep sessions alive |
 
-1. In Setup, search for "OAuth and OpenID Connect Settings"
-2. Turn on password flow
+4. Under **Security Settings**, enable all three:
 
-## Retrieving Client Credentials
+   | Setting | Value |
+   |---|---|
+   | Require Secret for Web Server Flow | **Yes** (checked) |
+   | Require Secret for Refresh Token Flow | **Yes** (checked) |
+   | Require Proof Key for Code Exchange (PKCE) | **Yes** (checked) |
 
-To view the Client ID and Client Secret of your connected app:
+5. Click **Save**
 
-1. Search for "External Client Apps" in the Setup page
-2. Look for the connected app you just created
-3. Click on Settings > Oauth Settings > App Settings > Consumer Key and Secret
+---
 
-## Important Notes
+## Step 4: Copy Your Consumer Key and Secret
 
-- The callback URL you configure in the connected app must match the `SF_CALLBACK_URL` environment variable
-- Keep your Client ID and Secret secure and never commit it to version control
+After saving, you need to retrieve the credentials:
+
+1. Go to **Setup** > search **"External Client Apps"** in Quick Find
+2. Find **Data Cloud MCP** in the list and click on it
+3. Navigate to: **Settings** > **OAuth Settings** > **App Settings**
+4. Copy the **Consumer Key** (this is your `SF_CLIENT_ID`)
+5. Click "Click to reveal" next to Consumer Secret and copy it (this is your `SF_CLIENT_SECRET`)
+
+> **Keep these safe.** Store them in your `.env` file, never in version control.
+
+---
+
+## Step 5: Configure OAuth Policies
+
+1. Go back to your Connected App page in Setup
+2. Click **Manage** (button at the top)
+3. Click **Edit Policies**
+4. Under **OAuth Policies**, find **IP Relaxation** and change it to:
+   ```
+   Relax IP restrictions
+   ```
+5. Click **Save**
+
+> **Why?** Without this, Salesforce blocks OAuth from localhost because it doesn't match any login IP range. This is safe for development — the PKCE flow still requires the browser login + authorization.
+
+---
+
+## Step 6: Assign the Connected App to Users (Optional)
+
+By default, the Connected App is available to all users in the org. If your org uses more restrictive policies:
+
+1. Go to **Setup** > **Permission Sets** (or **Profiles**)
+2. Find the permission set assigned to your Data Cloud users
+3. Under **Connected App Access**, add **Data Cloud MCP**
+
+---
+
+## Step 7: Verify Propagation
+
+Connected App changes can take **5-10 minutes** to propagate across Salesforce infrastructure.
+
+If you get `invalid_client_id` errors immediately after setup, wait 10 minutes and try again.
+
+---
+
+## Summary Checklist
+
+Before moving on to the MCP server configuration, confirm:
+
+- [ ] External Client Apps are enabled in Setup
+- [ ] Connected App "Data Cloud MCP" is created
+- [ ] Callback URL is exactly `http://localhost:55556/Callback`
+- [ ] All 5 OAuth scopes are added
+- [ ] PKCE is required
+- [ ] IP Relaxation is set to "Relax IP restrictions"
+- [ ] You have the Consumer Key and Consumer Secret copied
+- [ ] You've waited at least 5 minutes since saving
+
+---
+
+## Next Steps
+
+Return to the [README](README.md#configuration) and configure your `.env` file with the Consumer Key and Secret you just obtained.
+
+---
 
 ## Troubleshooting
 
-If you encounter issues:
-
-1. Verify that the connected app is enabled
-2. Check that the callback URL matches exactly (including case sensitivity)
-3. Ensure all required OAuth scopes are selected
-4. Verify that IP restrictions are relaxed if you're testing from different networks
-5. Ensure that you are not using port 55555 in your callback URL
+| Problem | Fix |
+|---|---|
+| Can't find "External Client Apps" in Setup | Your org edition may not support it. Try searching for "App Manager" instead and create a Connected App from there (same OAuth settings apply). |
+| "Connected App not found" error | Wait 10 minutes for propagation. If it persists, verify the Consumer Key matches. |
+| `invalid_client_id` | Double-check you copied the full Consumer Key (no trailing spaces). Also verify `SF_LOGIN_URL` matches the org where you created the app (e.g., `login.salesforce.com` vs `test.salesforce.com`). |
+| `redirect_uri_mismatch` | The Callback URL in the Connected App must be **exactly** `http://localhost:55556/Callback` (case-sensitive, no trailing slash). |
+| `PKCE challenge failed` | Make sure "Require Proof Key for Code Exchange" is checked. If you changed it after creation, wait 10 minutes. |
+| User can't authorize the app | The user needs to be assigned to the Connected App (see Step 6) or the app must allow "All users may self-authorize". |

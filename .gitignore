@@ -148,3 +148,7 @@ poetry.toml
 
 # LSP config files
 pyrightconfig.json
+
+# MCP configuration (may contain credential references)
+.mcp.json
+.mcp.json.*.bkp.json

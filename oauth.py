@@ -97,7 +97,7 @@ def _load_token_cache() -> dict:
 
 def _save_token_cache(token: str, instance_url: str, exp: datetime):
     try:
-        with open(_TOKEN_CACHE_PATH, "w") as f:
+        with open(os.open(_TOKEN_CACHE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             json.dump({"token": token, "instance_url": instance_url, "exp": exp.isoformat()}, f)
     except Exception:
         pass

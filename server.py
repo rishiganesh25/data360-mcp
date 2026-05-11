@@ -71,9 +71,12 @@ def list_tables() -> list[str]:
 def describe_table(
     table: str = Field(description="The table name"),
 ) -> list[str]:
-    sql = f"SELECT a.attname FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid) JOIN pg_catalog.pg_attribute a ON (a.attrelid = c.oid) JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid = def.adrelid AND a.attnum = def.adnum) LEFT JOIN pg_catalog.pg_description dsc ON (c.oid = dsc.objoid AND a.attnum = dsc.objsubid) LEFT JOIN pg_catalog.pg_class dc ON (dc.oid = dsc.classoid AND dc.relname = 'pg_class') LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace = dn.oid AND dn.nspname = 'pg_catalog') WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relname='{table}'"
+    import re
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', table):
+        return [f"error: invalid table name '{table}'"]
+    safe_table = table.replace("'", "''")
+    sql = "SELECT a.attname FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_class c ON (c.relnamespace = n.oid) JOIN pg_catalog.pg_attribute a ON (a.attrelid = c.oid) JOIN pg_catalog.pg_type t ON (a.atttypid = t.oid) LEFT JOIN pg_catalog.pg_attrdef def ON (a.attrelid = def.adrelid AND a.attnum = def.adnum) LEFT JOIN pg_catalog.pg_description dsc ON (c.oid = dsc.objoid AND a.attnum = dsc.objsubid) LEFT JOIN pg_catalog.pg_class dc ON (dc.oid = dsc.classoid AND dc.relname = 'pg_class') LEFT JOIN pg_catalog.pg_namespace dn ON (dc.relnamespace = dn.oid AND dn.nspname = 'pg_catalog') WHERE a.attnum > 0 AND NOT a.attisdropped AND c.relname='%s'" % safe_table
     result = run_query(oauth_session, sql)
-    # Extract data from the result dictionary
     data = result.get("data", [])
     return [x[0] for x in data]
 
@@ -286,13 +289,45 @@ def create_segment_dbt(
         return {"error": str(e)}
 
 
-@mcp.tool(description="Makes a generic Salesforce REST API call. Useful for exploring APIs.")
+_SF_REST_ALLOWED_PATH_PREFIXES = [
+    "/services/data/",
+    "/services/connect/",
+]
+
+_SF_REST_BLOCKED_PATH_PATTERNS = [
+    "/services/data/v",  # will be combined with suffix checks below
+]
+
+_SF_REST_BLOCKED_SUFFIXES = [
+    "/tooling",
+    "/composite",
+    "/async-queries",
+    "/actions/custom",
+]
+
+
+def _is_path_allowed(path: str) -> bool:
+    if not any(path.startswith(prefix) for prefix in _SF_REST_ALLOWED_PATH_PREFIXES):
+        return False
+    path_lower = path.lower()
+    for suffix in _SF_REST_BLOCKED_SUFFIXES:
+        if suffix in path_lower:
+            return False
+    return True
+
+
+@mcp.tool(description=(
+    "Makes a Salesforce REST API call scoped to /services/data/ and /services/connect/ paths. "
+    "Blocked: tooling, composite, async-queries, actions/custom endpoints."
+))
 def sf_rest_api(
     method: str = Field(description="HTTP method: GET, POST, PATCH, DELETE"),
     path: str = Field(description="API path starting with / (e.g., /services/data/v63.0/sobjects/MarketSegment)"),
     body: str = Field(default="", description="Optional JSON request body for POST/PATCH"),
 ) -> dict:
-    """Execute an arbitrary Salesforce REST API call."""
+    """Execute a Salesforce REST API call (restricted to safe path prefixes)."""
+    if not _is_path_allowed(path):
+        return {"error": f"Path not allowed: {path}. Only /services/data/ and /services/connect/ are permitted (excluding tooling, composite, async-queries, actions/custom)."}
     try:
         import requests as req
         base_url = oauth_session.get_instance_url()
