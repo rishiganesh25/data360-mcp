@@ -1,6 +1,6 @@
-# Data Cloud MCP Server
+# :zap: FLASH(Framework Layer for Agentic Serverless Headless Data360)
 
-A Model Context Protocol (MCP) server for **Salesforce Data Cloud** that exposes 30+ tools to AI assistants like Cursor, Claude Code, and Claude Desktop.
+A Model Context Protocol (MCP) server for **Salesforce Data360** that exposes 30+ tools to AI assistants like Cursor, Claude Code, and Claude Desktop.
 
 Query Data Cloud with SQL, manage data streams, create segments and calculated insights, explore the data model, and more — all from natural language in your AI assistant.
 
