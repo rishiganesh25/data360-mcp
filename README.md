@@ -1,4 +1,4 @@
-# FLASH
+# :zap: FLASH
 
 A Headless, API-Native & Agentic AI Framework for Salesforce Data360
 
