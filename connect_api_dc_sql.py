@@ -11,13 +11,30 @@ from oauth import OAuthSession, OAuthConfig
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_error_body(text: str, max_len: int = 1000) -> str:
+    """Strip tokens or auth headers that the server might echo back in errors."""
+    if not text:
+        return ""
+    import re
+    sanitized = text[:max_len]
+    sanitized = re.sub(
+        r'(Bearer\s+)[A-Za-z0-9._\-]+',
+        r'\1****',
+        sanitized,
+    )
+    sanitized = re.sub(
+        r'("?access_token"?\s*[:=]\s*"?)[A-Za-z0-9._\-]+',
+        r'\1****',
+        sanitized,
+    )
+    return sanitized
+
+
 def _handle_error_response(response: requests.Response):
     if response.status_code >= 300:
-        # Parse error message from response
         message = response.text
         try:
             payload = json.loads(response.text)
-            # Connect API error format: list with first element containing JSON string in "message"
             if isinstance(payload, list) and len(payload) > 0:
                 structured_message = payload[0]
                 try:
@@ -31,11 +48,10 @@ def _handle_error_response(response: requests.Response):
         except Exception:
             pass
 
-        # Raise exception with error message
         raise Exception(
             response.status_code,
             response.reason,
-            message,
+            _sanitize_error_body(str(message)),
         )
 
 

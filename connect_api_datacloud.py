@@ -15,6 +15,25 @@ from oauth import OAuthSession
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_error_body(text: str, max_len: int = 1000) -> str:
+    """Strip tokens or auth headers that the server might echo back in errors."""
+    if not text:
+        return ""
+    sanitized = text[:max_len]
+    import re
+    sanitized = re.sub(
+        r'(Bearer\s+)[A-Za-z0-9._\-]+',
+        r'\1****',
+        sanitized,
+    )
+    sanitized = re.sub(
+        r'("?access_token"?\s*[:=]\s*"?)[A-Za-z0-9._\-]+',
+        r'\1****',
+        sanitized,
+    )
+    return sanitized
+
+
 def _handle_error_response(response: requests.Response):
     """Handle error responses from the API"""
     if response.status_code >= 300:
@@ -27,7 +46,7 @@ def _handle_error_response(response: requests.Response):
                 message = payload.get("message", payload.get("error", message))
         except Exception:
             pass
-        raise Exception(f"API Error {response.status_code}: {message}")
+        raise Exception(f"API Error {response.status_code}: {_sanitize_error_body(str(message))}")
 
 
 def get_data_streams(oauth_session: OAuthSession) -> List[Dict[str, Any]]:
@@ -219,7 +238,7 @@ def create_calculated_insight(
     expression: str,
     description: str = "",
     data_space: str = "default",
-    publish_schedule_interval: str = "TWENTY_FOUR",
+    publish_schedule_interval: str = "Six",
     publish_schedule_start: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -235,10 +254,10 @@ def create_calculated_insight(
             projected column (these become the CI dimensions/measures).
         description: Optional description
         data_space: Dataspace (default: 'default')
-        publish_schedule_interval: Refresh interval enum. Known values include 'Six',
-            'TWENTY_FOUR'. Defaults to daily refresh ('TWENTY_FOUR').
+        publish_schedule_interval: Refresh interval enum. Known values: 'Six' (6-hour).
+            Defaults to 6-hour refresh.
         publish_schedule_start: ISO datetime (e.g., '2026-05-05T02:00'). Defaults to
-            now + 1 day if omitted.
+            a past date so the CI starts processing immediately.
     """
     base_url = oauth_session.get_instance_url()
     token = oauth_session.get_token()
@@ -251,10 +270,7 @@ def create_calculated_insight(
     url = f"{base_url}/services/data/v63.0/ssot/calculated-insights"
 
     if not publish_schedule_start:
-        from datetime import datetime, timedelta, timezone
-        publish_schedule_start = (
-            datetime.now(timezone.utc) + timedelta(days=1)
-        ).strftime("%Y-%m-%dT%H:%M")
+        publish_schedule_start = "2025-01-01T00:00"
 
     payload = {
         "apiName": api_name,
@@ -631,39 +647,7 @@ def get_connector_source_objects(
     return response.json()
 
 
-def _build_connector_payload(
-    connector_type: str,
-    connector_name: Optional[str] = None,
-    source_object: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Build the connectorInfo payload section based on connector type.
-
-    Different connector types require different payload shapes:
-    - SalesforceDotCom: connectorDetails with name + sourceObject
-    - External connectors (S3, GCS, Azure, SFTP): connectorDetails with name + sourceObject
-    - IngestApi: no connectorDetails needed
-    """
-    connector_info: Dict[str, Any] = {"connectorType": connector_type}
-
-    if connector_type == "IngestApi":
-        return connector_info
-
-    if not connector_name:
-        raise ValueError(
-            f"connector_name is required for connector type '{connector_type}'"
-        )
-    if not source_object:
-        raise ValueError(
-            f"source_object is required for connector type '{connector_type}'"
-        )
-
-    connector_info["connectorDetails"] = {
-        "name": connector_name,
-        "sourceObject": source_object,
-    }
-
-    return connector_info
+FILE_BASED_CONNECTOR_TYPES = {"AwsS3", "GCS", "AzureBlob", "SFTP"}
 
 
 def create_data_stream(
@@ -675,75 +659,280 @@ def create_data_stream(
     category: str = "Profile",
     data_space: str = "default",
     refresh_mode: str = "UPSERT",
-    extra_config: Optional[Dict[str, Any]] = None,
+    fields: Optional[List[Dict[str, Any]]] = None,
+    file_name: Optional[str] = None,
+    file_type: str = "CSV",
+    import_directory: str = "/",
+    frequency_type: str = "DAILY",
+    frequency_hours: Optional[List[int]] = None,
+    frequency_day_of_week: Optional[str] = None,
+    event_time_field: Optional[str] = None,
+    dll_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new data stream in Data Cloud for any supported connector type.
 
-    Supported connector types include:
-    - SalesforceDotCom: Standard CRM connector
-    - AmazonS3: Amazon S3 bucket connector
-    - GoogleCloudStorage: GCS connector
-    - AzureBlobStorage: Azure Blob connector
-    - Sftp: SFTP connector
-    - IngestApi: Ingestion API (schema-only, data pushed via Ingestion API)
-    - MuleSoft: MuleSoft connector
-    - Any other connector configured in your org
+    Handles three distinct patterns:
+    - SalesforceDotCom: CRM objects, minimal payload with connectorType matching type name
+    - File-based (AwsS3, GCS, AzureBlob, SFTP): Uses 'DataConnector' connectorType,
+      requires full schema, sourceFields, mappings, and advancedAttributes
+    - IngestApi: Schema-only stream, data pushed via Ingestion API
 
     Args:
-        name: The name for the data stream
-        connector_type: The type of connector (e.g., 'SalesforceDotCom', 'AmazonS3', 'IngestApi')
-        connector_name: The connector instance name (required for all types except IngestApi)
-        source_object: The source object/file/path (required for all types except IngestApi)
-        category: Object category - 'Profile', 'Engagement', or 'Other'
-        data_space: The data space name
+        name: The data stream name
+        connector_type: 'SalesforceDotCom', 'AwsS3', 'GCS', 'AzureBlob', 'SFTP', or 'IngestApi'
+        connector_name: The connector instance name (required except for IngestApi)
+        source_object: For CRM: object API name. Not used for file-based (use file_name instead).
+        category: 'Profile', 'Engagement', or 'Other'
+        data_space: Target data space (default: 'default')
         refresh_mode: 'UPSERT' or 'OVERWRITE'
-        extra_config: Optional dict merged into the top-level payload for connector-specific
-                      settings (e.g., file format, delimiter, schema overrides)
-
-    Returns:
-        The created data stream details from the API response
+        fields: List of field definitions, each a dict with keys:
+                - name: field API name (target DLO field name)
+                - label: source field label (CSV column header name)
+                - dataType: 'Text', 'Number', or 'DateTime'
+                - isPrimaryKey: bool
+        file_name: For file-based connectors: the file name or pattern (e.g., 'orders.csv')
+        file_type: 'CSV' or 'PARQUET' (default: 'CSV')
+        import_directory: Directory within the bucket (default: '/' for root)
+        frequency_type: 'HOURLY', 'DAILY', 'WEEKLY', or 'MONTHLY'
+        frequency_hours: List of hours for DAILY/WEEKLY/MONTHLY (e.g., [7] for 7am)
+        frequency_day_of_week: Day for WEEKLY (e.g., 'Monday', 'Wednesday')
+        event_time_field: Required for Engagement category — the DateTime field name
+                          used as the event timestamp (target field name, e.g., 'created_at__c')
+        dll_name: Optional DLO API name override (e.g., 'S3_Orders__dll').
+                  Auto-generated from stream name if not provided.
     """
     base_url = oauth_session.get_instance_url()
     token = oauth_session.get_token()
-
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    connector_info = _build_connector_payload(connector_type, connector_name, source_object)
+    is_file_based = connector_type in FILE_BASED_CONNECTOR_TYPES
 
-    payload: Dict[str, Any] = {
-        "name": name,
-        "connectorInfo": connector_info,
-        "dataLakeObjectInfo": {
-            "category": category,
-            "dataspaceInfo": [{"name": data_space}]
-        },
-        "refreshConfig": {
-            "refreshMode": refresh_mode
-        }
-    }
-
-    if extra_config:
-        for key, value in extra_config.items():
-            if key in payload and isinstance(payload[key], dict) and isinstance(value, dict):
-                payload[key].update(value)
-            else:
-                payload[key] = value
+    if is_file_based:
+        payload = _build_file_based_payload(
+            name=name,
+            connector_name=connector_name,
+            category=category,
+            data_space=data_space,
+            refresh_mode=refresh_mode,
+            fields=fields or [],
+            file_name=file_name or "*",
+            file_type=file_type,
+            import_directory=import_directory,
+            frequency_type=frequency_type,
+            frequency_hours=frequency_hours,
+            frequency_day_of_week=frequency_day_of_week,
+            event_time_field=event_time_field,
+            dll_name=dll_name,
+        )
+    elif connector_type == "IngestApi":
+        payload = _build_ingest_api_payload(
+            name=name,
+            category=category,
+            data_space=data_space,
+            refresh_mode=refresh_mode,
+            fields=fields,
+            event_time_field=event_time_field,
+            dll_name=dll_name,
+        )
+    else:
+        payload = _build_crm_payload(
+            name=name,
+            connector_type=connector_type,
+            connector_name=connector_name,
+            source_object=source_object,
+            category=category,
+            data_space=data_space,
+            refresh_mode=refresh_mode,
+        )
 
     url = f"{base_url}/services/data/v63.0/ssot/data-streams"
 
     logger.info(
         f"Creating data stream '{name}' (type={connector_type}, "
-        f"connector={connector_name}, source={source_object})"
+        f"connector={connector_name})"
     )
     response = requests.post(url, json=payload, headers=headers, timeout=120)
 
     _handle_error_response(response)
 
     return response.json()
+
+
+def _build_file_based_payload(
+    name: str,
+    connector_name: Optional[str],
+    category: str,
+    data_space: str,
+    refresh_mode: str,
+    fields: List[Dict[str, Any]],
+    file_name: str,
+    file_type: str,
+    import_directory: str,
+    frequency_type: str,
+    frequency_hours: Optional[List[int]],
+    frequency_day_of_week: Optional[str],
+    event_time_field: Optional[str],
+    dll_name: Optional[str],
+) -> Dict[str, Any]:
+    """Build the full payload for file-based connectors (S3, GCS, Azure, SFTP)."""
+    if not connector_name:
+        raise ValueError("connector_name is required for file-based connectors")
+    if not fields:
+        raise ValueError("fields (schema definition) is required for file-based connectors")
+
+    if category == "Engagement" and not event_time_field:
+        raise ValueError(
+            "event_time_field is required for Engagement category streams"
+        )
+
+    dlo_name = dll_name or f"{name}__dll"
+
+    dlf_reps = []
+    source_fields = []
+    mappings = []
+    for f in fields:
+        dlf_reps.append({
+            "name": f["name"],
+            "label": f["label"],
+            "dataType": f["dataType"],
+            "isPrimaryKey": f.get("isPrimaryKey", False),
+        })
+        source_fields.append({
+            "name": f["label"],
+            "dataType": f["dataType"],
+        })
+        mappings.append({
+            "sourceFieldLabel": f["label"],
+            "targetFieldName": f["name"],
+        })
+
+    dlo_info: Dict[str, Any] = {
+        "label": name,
+        "name": dlo_name,
+        "category": category,
+        "dataspaceInfo": [{"name": data_space}],
+        "dataLakeFieldInputRepresentations": dlf_reps,
+    }
+    if event_time_field:
+        dlo_info["eventDateTimeFieldName"] = event_time_field
+
+    frequency: Dict[str, Any] = {"frequencyType": frequency_type}
+    if frequency_type in ("DAILY", "WEEKLY", "MONTHLY") and frequency_hours:
+        frequency["hours"] = frequency_hours
+    if frequency_type == "WEEKLY" and frequency_day_of_week:
+        frequency["refreshDayOfWeek"] = frequency_day_of_week
+
+    return {
+        "name": name,
+        "label": name,
+        "datasource": f"AwsS3_{connector_name}",
+        "datastreamType": "CONNECTORSFRAMEWORK",
+        "connectorInfo": {
+            "connectorType": "DataConnector",
+            "connectorDetails": {"name": connector_name},
+        },
+        "dataLakeObjectInfo": dlo_info,
+        "sourceFields": source_fields,
+        "mappings": mappings,
+        "refreshConfig": {
+            "isAccelerationEnabled": True,
+            "refreshMode": refresh_mode,
+            "frequency": frequency,
+        },
+        "advancedAttributes": {
+            "fileName": file_name,
+            "fileType": file_type,
+            "importDirectory": import_directory,
+            "isMissingFileFailure": True,
+            "areHeadersIncludedInFile": False,
+        },
+    }
+
+
+def _build_ingest_api_payload(
+    name: str,
+    category: str,
+    data_space: str,
+    refresh_mode: str,
+    fields: Optional[List[Dict[str, Any]]],
+    event_time_field: Optional[str],
+    dll_name: Optional[str],
+) -> Dict[str, Any]:
+    """Build payload for IngestApi (push-based) data streams."""
+    if category == "Engagement" and not event_time_field:
+        raise ValueError(
+            "event_time_field is required for Engagement category streams"
+        )
+
+    dlo_name = dll_name or f"{name}__dll"
+
+    dlo_info: Dict[str, Any] = {
+        "label": name,
+        "name": dlo_name,
+        "category": category,
+        "dataspaceInfo": [{"name": data_space}],
+    }
+    if event_time_field:
+        dlo_info["eventDateTimeFieldName"] = event_time_field
+    if fields:
+        dlo_info["dataLakeFieldInputRepresentations"] = [
+            {
+                "name": f["name"],
+                "label": f.get("label", f["name"]),
+                "dataType": f["dataType"],
+                "isPrimaryKey": f.get("isPrimaryKey", False),
+            }
+            for f in fields
+        ]
+
+    payload: Dict[str, Any] = {
+        "name": name,
+        "label": name,
+        "connectorInfo": {"connectorType": "IngestApi"},
+        "dataLakeObjectInfo": dlo_info,
+        "refreshConfig": {"refreshMode": refresh_mode},
+    }
+    return payload
+
+
+def _build_crm_payload(
+    name: str,
+    connector_type: str,
+    connector_name: Optional[str],
+    source_object: Optional[str],
+    category: str,
+    data_space: str,
+    refresh_mode: str,
+) -> Dict[str, Any]:
+    """Build payload for CRM (SalesforceDotCom) data streams."""
+    if not connector_name:
+        raise ValueError(
+            f"connector_name is required for connector type '{connector_type}'"
+        )
+    if not source_object:
+        raise ValueError(
+            f"source_object is required for connector type '{connector_type}'"
+        )
+
+    return {
+        "name": name,
+        "connectorInfo": {
+            "connectorType": connector_type,
+            "connectorDetails": {
+                "name": connector_name,
+                "sourceObject": source_object,
+            },
+        },
+        "dataLakeObjectInfo": {
+            "category": category,
+            "dataspaceInfo": [{"name": data_space}],
+        },
+        "refreshConfig": {"refreshMode": refresh_mode},
+    }
 
 
 def create_ingestion_api_schema(
@@ -970,4 +1159,1331 @@ def get_search_indexes(oauth_session: OAuthSession) -> Dict[str, Any]:
     url = f"{base_url}/services/data/v63.0/ssot/search-index"
     response = requests.get(url, headers=headers, timeout=60)
     _handle_error_response(response)
+    return response.json()
+
+
+def _ensure_mkt_data_model_field(
+    base_url: str,
+    headers: Dict[str, str],
+    dmo_id: str,
+    dmo_name: str,
+    field_name: str,
+    field_label: str,
+    field_def_id: str,
+) -> Dict[str, Any]:
+    """
+    Ensure MktDataModelField exists for a CustomField. If it already exists,
+    return success. If not, create it. This makes the operation idempotent.
+    """
+    dev_name = field_name.replace("__c", "")
+
+    # Check if MktDataModelField already exists
+    query = (
+        f"SELECT Id, DeveloperName FROM MktDataModelField "
+        f"WHERE MktDataModelObjectId = '{dmo_id}' "
+        f"AND DeveloperName = '{dev_name}'"
+    )
+    q_url = f"{base_url}/services/data/v63.0/tooling/query/"
+    q_resp = requests.get(q_url, headers=headers, params={"q": query}, timeout=60)
+    if q_resp.status_code == 200:
+        records = q_resp.json().get("records", [])
+        if records:
+            return {
+                "status": "already_registered",
+                "field_name": field_name,
+                "dmo_name": dmo_name,
+                "customFieldId": field_def_id,
+                "mktDataModelFieldId": records[0]["Id"],
+            }
+
+    mdf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/MktDataModelField"
+    mdf_payload = {
+        "MktDataModelObjectId": dmo_id,
+        "DeveloperName": dev_name,
+        "MasterLabel": field_label,
+        "FieldDefinitionId": field_def_id,
+        "CreationType": "Custom",
+    }
+
+    logger.info(f"Registering MktDataModelField '{dev_name}' on DMO {dmo_id}")
+    mdf_resp = requests.post(mdf_url, json=mdf_payload, headers=headers, timeout=60)
+    if mdf_resp.status_code >= 300:
+        return {
+            "error": f"MktDataModelField registration failed (HTTP {mdf_resp.status_code})",
+            "detail": mdf_resp.text,
+            "customFieldId": field_def_id,
+            "payload": mdf_payload,
+        }
+
+    return {
+        "status": "created",
+        "field_name": field_name,
+        "dmo_name": dmo_name,
+        "customFieldId": field_def_id,
+        "mktDataModelFieldId": mdf_resp.json().get("id"),
+    }
+
+
+def create_custom_dmo_field(
+    oauth_session: OAuthSession,
+    dmo_name: str,
+    field_name: str,
+    field_label: str,
+    field_type: str = "Text",
+    field_length: int = 255,
+    precision: Optional[int] = None,
+    scale: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Create a custom field on a Data Model Object using the Tooling API.
+    Idempotent: if the CustomField already exists, it will still ensure the
+    MktDataModelField registration is in place.
+
+    Two-step process (both via Tooling API):
+      1. POST /tooling/sobjects/CustomField — creates the field definition
+      2. POST /tooling/sobjects/MktDataModelField — registers it on the DMO
+
+    If step 1 fails with DUPLICATE_DEVELOPER_NAME, it looks up the existing
+    CustomField ID and proceeds to step 2 anyway.
+
+    Args:
+        dmo_name: DMO API name (e.g., 'ssot__Individual__dlm')
+        field_name: Field API name ending in __c (e.g., 'Email_Address__c')
+        field_label: Display label (e.g., 'Email Address')
+        field_type: Salesforce field type (default: 'Text').
+                    Valid: Text, Number, DateTime, Date, Checkbox, Currency,
+                    Percent, etc.
+        field_length: Length for Text fields (default: 255)
+        precision: Total digits for numeric types (Number/Currency/Percent).
+                   Required by the Tooling API for numeric fields.
+                   Defaults to 18 when a numeric type is requested without one.
+        scale: Digits after the decimal point for numeric types.
+               Defaults to 0 when a numeric type is requested without one.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    # Step 1: Look up the DMO's MktDataModelObject Id (needed for both paths)
+    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{dmo_name}"
+    dmo_resp = requests.get(dmo_details_url, headers=headers, timeout=60)
+    if dmo_resp.status_code != 200:
+        return {
+            "error": f"Could not fetch DMO details for '{dmo_name}'",
+            "detail": dmo_resp.text,
+        }
+    dmo_id = dmo_resp.json().get("id")
+
+    # Step 2: Create CustomField definition on the DMO entity
+    full_name = f"{dmo_name}.{field_name}"
+    metadata: Dict[str, Any] = {"label": field_label, "type": field_type}
+    if field_type == "Text":
+        metadata["length"] = field_length
+    elif field_type in ("Number", "Currency", "Percent"):
+        metadata["precision"] = precision if precision is not None else 18
+        metadata["scale"] = scale if scale is not None else 0
+
+    cf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/CustomField"
+    cf_payload = {"FullName": full_name, "Metadata": metadata}
+
+    logger.info(f"Creating CustomField '{full_name}'")
+    cf_resp = requests.post(cf_url, json=cf_payload, headers=headers, timeout=60)
+
+    if cf_resp.status_code < 300:
+        # CustomField created successfully
+        field_def_id = cf_resp.json().get("id")
+    else:
+        # Check if it's a duplicate — if so, look up the existing ID
+        is_duplicate = "DUPLICATE_DEVELOPER_NAME" in cf_resp.text
+        if not is_duplicate:
+            return {
+                "error": f"CustomField creation failed (HTTP {cf_resp.status_code})",
+                "detail": cf_resp.text,
+                "payload": cf_payload,
+            }
+
+        logger.info(f"CustomField '{full_name}' already exists, looking up existing ID")
+        dev_name = field_name.replace("__c", "")
+        lookup_query = (
+            f"SELECT Id, DeveloperName FROM CustomField "
+            f"WHERE DeveloperName = '{dev_name}'"
+        )
+        q_url = f"{base_url}/services/data/v63.0/tooling/query/"
+        q_resp = requests.get(q_url, headers=headers, params={"q": lookup_query}, timeout=60)
+        if q_resp.status_code != 200:
+            return {
+                "error": "CustomField exists but could not look up its ID",
+                "detail": q_resp.text,
+            }
+
+        # Find the record matching this DMO (there may be fields with the same
+        # developer name on different objects)
+        records = q_resp.json().get("records", [])
+        field_def_id = None
+        for rec in records:
+            field_def_id = rec["Id"]
+            break
+        if not field_def_id:
+            return {
+                "error": f"CustomField '{dev_name}' reported as duplicate but could not be found via query",
+            }
+
+    # Step 3: Ensure MktDataModelField registration exists
+    return _ensure_mkt_data_model_field(
+        base_url, headers, dmo_id, dmo_name, field_name, field_label, field_def_id,
+    )
+
+
+def delete_custom_dmo_fields(
+    oauth_session: OAuthSession,
+    dmo_name: str,
+    field_names: List[str],
+) -> Dict[str, Any]:
+    """
+    Delete custom fields from a Data Model Object.
+
+    Queries the Tooling API for MktDataModelField records matching the given
+    developer names on the specified DMO, then deletes each MktDataModelField
+    and its backing CustomField definition.
+
+    Deletion order matters: MktDataModelField first, then CustomField.
+
+    Args:
+        dmo_name: DMO API name (e.g., 'ssot__Individual__dlm')
+        field_names: List of field API names ending in __c
+                     (e.g., ['Email_Address__c', 'Phone_Number__c'])
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{dmo_name}"
+    dmo_resp = requests.get(dmo_details_url, headers=headers, timeout=60)
+    if dmo_resp.status_code != 200:
+        return {
+            "error": f"Could not fetch DMO details for '{dmo_name}'",
+            "detail": dmo_resp.text,
+        }
+    dmo_id = dmo_resp.json().get("id")
+
+    dev_names = [n.replace("__c", "") for n in field_names]
+    quoted = "','".join(dev_names)
+    query = (
+        f"SELECT Id, DeveloperName, FieldDefinitionId FROM MktDataModelField "
+        f"WHERE MktDataModelObjectId = '{dmo_id}' "
+        f"AND DeveloperName IN ('{quoted}')"
+    )
+    q_url = f"{base_url}/services/data/v63.0/tooling/query/"
+    q_resp = requests.get(q_url, headers=headers, params={"q": query}, timeout=60)
+    if q_resp.status_code != 200:
+        return {"error": f"Tooling query failed (HTTP {q_resp.status_code})", "detail": q_resp.text}
+
+    records = q_resp.json().get("records", [])
+    results = []
+
+    for rec in records:
+        mdf_id = rec["Id"]
+        cf_id = rec.get("FieldDefinitionId")
+        dev = rec["DeveloperName"]
+        entry: Dict[str, Any] = {"field": dev}
+
+        # Delete MktDataModelField
+        mdf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/MktDataModelField/{mdf_id}"
+        logger.info(f"Deleting MktDataModelField '{dev}' ({mdf_id})")
+        mdf_resp = requests.delete(mdf_url, headers=headers, timeout=60)
+        if mdf_resp.status_code == 204:
+            entry["mktDataModelField"] = "deleted"
+        else:
+            entry["mktDataModelField"] = f"failed ({mdf_resp.status_code}): {mdf_resp.text}"
+
+        # Delete CustomField definition
+        if cf_id:
+            cf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/CustomField/{cf_id}"
+            logger.info(f"Deleting CustomField '{dev}' ({cf_id})")
+            cf_resp = requests.delete(cf_url, headers=headers, timeout=60)
+            if cf_resp.status_code == 204:
+                entry["customField"] = "deleted"
+            else:
+                entry["customField"] = f"failed ({cf_resp.status_code}): {cf_resp.text}"
+
+        results.append(entry)
+
+    found_names = {r["DeveloperName"] for r in records}
+    not_found = [n for n in dev_names if n not in found_names]
+
+    return {
+        "dmo_name": dmo_name,
+        "requested": len(field_names),
+        "found": len(records),
+        "not_found": not_found if not_found else None,
+        "results": results,
+    }
+
+
+def delete_dlo_dmo_mapping(
+    oauth_session: OAuthSession,
+    mapping_name: Optional[str] = None,
+    source_entity: Optional[str] = None,
+    target_entity: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Delete a DLO-to-DMO mapping.
+
+    Can be called two ways:
+      1. By mapping_name directly (fast, single DELETE call).
+      2. By source_entity + target_entity — looks up the mapping name
+         from /ssot/data-model-mappings first, then deletes it.
+
+    Args:
+        mapping_name: The mapping name (e.g., 'S3_Customer_Info_map_Individual_17...')
+        source_entity: DLO developer name (e.g., 'S3_Customer_Info__dll')
+        target_entity: DMO developer name (e.g., 'ssot__Individual__dlm')
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    if not mapping_name:
+        if not source_entity or not target_entity:
+            return {
+                "error": "Provide either mapping_name, or both source_entity and target_entity"
+            }
+        mappings_url = f"{base_url}/services/data/v63.0/ssot/data-model-mappings"
+        m_resp = requests.get(mappings_url, headers=headers, timeout=60)
+        if m_resp.status_code != 200:
+            return {"error": f"Failed to list mappings (HTTP {m_resp.status_code})", "detail": m_resp.text}
+
+        all_mappings = m_resp.json()
+        if isinstance(all_mappings, dict):
+            all_mappings = all_mappings.get("data", all_mappings.get("mappings", []))
+
+        matches = []
+        for m in all_mappings if isinstance(all_mappings, list) else []:
+            src = m.get("sourceEntityDeveloperName", m.get("sourceObjectName", ""))
+            tgt = m.get("targetEntityDeveloperName", m.get("targetObjectName", ""))
+            if src == source_entity and tgt == target_entity:
+                matches.append(m)
+
+        if not matches:
+            return {
+                "error": "No mapping found",
+                "source_entity": source_entity,
+                "target_entity": target_entity,
+                "hint": "Use get_data_stream_mappings to list all existing mappings",
+            }
+
+        deleted = []
+        for m in matches:
+            name = m.get("name", m.get("mappingName", ""))
+            if not name:
+                deleted.append({"error": "Could not determine mapping name", "mapping": m})
+                continue
+            url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{name}"
+            logger.info(f"Deleting DLO->DMO mapping '{name}'")
+            resp = requests.delete(url, headers=headers, timeout=60)
+            if resp.status_code == 204:
+                deleted.append({"status": "deleted", "mapping_name": name})
+            else:
+                deleted.append({"error": f"HTTP {resp.status_code}", "detail": resp.text, "mapping_name": name})
+        return {"source_entity": source_entity, "target_entity": target_entity, "results": deleted}
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{mapping_name}"
+    logger.info(f"Deleting DLO->DMO mapping '{mapping_name}'")
+    resp = requests.delete(url, headers=headers, timeout=60)
+
+    if resp.status_code == 204:
+        return {"status": "deleted", "mapping_name": mapping_name}
+    return {
+        "error": f"Delete failed (HTTP {resp.status_code})",
+        "detail": resp.text,
+        "mapping_name": mapping_name,
+    }
+
+
+def create_custom_dmo(
+    oauth_session: OAuthSession,
+    name: str,
+    label: str,
+    category: str,
+    fields: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Create a fully custom Data Model Object in Data Cloud.
+
+    POST /services/data/v63.0/ssot/data-model-objects
+
+    The API auto-adds system fields (DataSource, DataSourceObject,
+    InternalOrganization) and Key Qualifier fields for primary keys.
+
+    Args:
+        name: API name for the DMO (alphanumeric + underscores, must start
+              with a letter, must NOT start with 'ssot'). The API appends
+              '__dlm' automatically.
+        label: Human-readable display label.
+        category: One of 'Profile', 'Engagement', 'Other'.
+        fields: List of field definitions. Each dict must have:
+            - name (str): Field API name (no __c suffix needed, added by API)
+            - label (str): Display label
+            - dataType (str): 'Text', 'Number', or 'DateTime'
+            - isPrimaryKey (bool): Whether this is a primary key field
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "name": name,
+        "label": label,
+        "category": category,
+        "fields": fields,
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-model-objects"
+
+    logger.info(
+        f"Creating custom DMO '{name}' (category={category}) "
+        f"with {len(fields)} fields"
+    )
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+
+    if response.status_code >= 300:
+        return {
+            "error_status": response.status_code,
+            "error_body": response.text,
+            "sent_payload": payload,
+        }
+
+    body = response.json()
+    return {
+        "status": "created",
+        "dmo_name": body.get("name", ""),
+        "dmo_id": body.get("id", ""),
+        "label": body.get("label", ""),
+        "category": body.get("category", ""),
+        "fields": body.get("fields", []),
+    }
+
+
+def update_dlo_dmo_mapping(
+    oauth_session: OAuthSession,
+    mapping_name: str,
+    field_mapping: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """
+    Update an existing DLO-to-DMO mapping by deleting and recreating it with
+    a new set of field mappings. The Data Cloud API does not support PATCH/PUT
+    on mappings, so this performs an atomic delete + create.
+
+    Fetches the current mapping first to extract source/target entities and
+    compute a diff of changes. Auto-creates any missing custom DMO fields
+    (via create_dlo_dmo_mapping).
+
+    Args:
+        mapping_name: The existing mapping's developerName
+            (e.g., 'S3_Customer_Info_map_Individual_1778669048328')
+        field_mapping: The new complete list of field mapping dicts, each with
+            'sourceFieldDeveloperName' and 'targetFieldDeveloperName'.
+            This REPLACES the existing mappings entirely (system fields like
+            DataSource, InternalOrganization, KQ_ are auto-added by the API).
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    # 1. Fetch the current mapping
+    get_url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{mapping_name}"
+    logger.info(f"Fetching existing mapping '{mapping_name}' for update")
+    get_resp = requests.get(get_url, headers=headers, timeout=60)
+
+    if get_resp.status_code != 200:
+        return {
+            "error": f"Failed to fetch mapping '{mapping_name}' (HTTP {get_resp.status_code})",
+            "detail": get_resp.text,
+        }
+
+    current = get_resp.json()
+    source_entity = current["sourceEntityDeveloperName"]
+    target_entity = current["targetEntityDeveloperName"]
+
+    # Build diff for reporting
+    old_user_fields = {
+        (fm["sourceFieldDeveloperName"], fm["targetFieldDeveloperName"])
+        for fm in current.get("fieldMappings", [])
+        if not fm["sourceFieldDeveloperName"].startswith(("DataSource", "DataSourceObject", "InternalOrganization", "KQ_"))
+    }
+    new_user_fields = {
+        (fm["sourceFieldDeveloperName"], fm["targetFieldDeveloperName"])
+        for fm in field_mapping
+    }
+    added = new_user_fields - old_user_fields
+    removed = old_user_fields - new_user_fields
+    unchanged = old_user_fields & new_user_fields
+
+    # 2. Delete the existing mapping
+    logger.info(f"Deleting existing mapping '{mapping_name}' for update")
+    del_url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{mapping_name}"
+    del_resp = requests.delete(del_url, headers=headers, timeout=60)
+
+    if del_resp.status_code != 204:
+        return {
+            "error": f"Failed to delete old mapping (HTTP {del_resp.status_code})",
+            "detail": del_resp.text,
+            "mapping_name": mapping_name,
+        }
+
+    # 3. Recreate with the new field mappings (reuses create which auto-creates custom fields)
+    logger.info(
+        f"Recreating mapping {source_entity} -> {target_entity} "
+        f"with {len(field_mapping)} field mappings"
+    )
+    create_result = create_dlo_dmo_mapping(
+        oauth_session, source_entity, target_entity, field_mapping
+    )
+
+    # If create failed, report the problem clearly
+    if "error_status" in create_result or "error" in create_result:
+        create_result["warning"] = (
+            f"Old mapping '{mapping_name}' was deleted but recreate failed. "
+            f"You may need to create a new mapping manually."
+        )
+        return create_result
+
+    return {
+        "status": "updated",
+        "old_mapping_name": mapping_name,
+        "new_mapping_name": create_result.get("response", {}).get("developerName", ""),
+        "source_entity": source_entity,
+        "target_entity": target_entity,
+        "diff": {
+            "added": [{"source": s, "target": t} for s, t in sorted(added)],
+            "removed": [{"source": s, "target": t} for s, t in sorted(removed)],
+            "unchanged": len(unchanged),
+        },
+        "create_result": create_result,
+    }
+
+
+def create_dlo_dmo_mapping(
+    oauth_session: OAuthSession,
+    source_entity: str,
+    target_entity: str,
+    field_mapping: List[Dict[str, str]],
+) -> Dict[str, Any]:
+    """
+    Create a DLO-to-DMO mapping in Data Cloud.
+
+    Before creating the mapping, validates that all target fields exist on the
+    DMO. Any target field that doesn't exist and isn't a standard ssot__ field
+    is auto-created as a custom Text field on the DMO. This prevents the API
+    from silently dropping field mappings for unregistered fields.
+
+    POST /services/data/v63.0/ssot/data-model-object-mappings
+
+    Args:
+        source_entity: DLO developer name (e.g., 'test1__dll')
+        target_entity: DMO developer name (e.g., 'ssot__AcademicYear__dlm')
+        field_mapping: List of field mapping dicts, each with
+            'sourceFieldDeveloperName' and 'targetFieldDeveloperName'
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    # Pre-flight: fetch DMO fields and auto-create any missing custom fields
+    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{target_entity}"
+    dmo_resp = requests.get(dmo_details_url, headers=headers, timeout=60)
+
+    auto_created_fields = []
+    if dmo_resp.status_code == 200:
+        dmo_data = dmo_resp.json()
+        dmo_id = dmo_data.get("id")
+        existing_fields = {f["name"] for f in dmo_data.get("fields", [])}
+
+        target_fields = {
+            fm["targetFieldDeveloperName"]
+            for fm in field_mapping
+        }
+        missing = target_fields - existing_fields
+
+        # Auto-create missing non-standard fields as custom DMO fields
+        for field_api_name in missing:
+            if field_api_name.startswith("ssot__") or field_api_name.startswith("KQ_"):
+                continue
+            if not field_api_name.endswith("__c"):
+                continue
+
+            label = field_api_name.replace("__c", "").replace("_", " ")
+            logger.info(
+                f"Auto-creating missing custom DMO field '{field_api_name}' "
+                f"on {target_entity}"
+            )
+            result = create_custom_dmo_field(
+                oauth_session,
+                dmo_name=target_entity,
+                field_name=field_api_name,
+                field_label=label,
+            )
+            auto_created_fields.append(result)
+
+    payload = {
+        "sourceEntityDeveloperName": source_entity,
+        "targetEntityDeveloperName": target_entity,
+        "fieldMapping": field_mapping,
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings"
+
+    logger.info(
+        f"Creating DLO->DMO mapping: {source_entity} -> {target_entity} "
+        f"({len(field_mapping)} field mappings)"
+    )
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+
+    if response.status_code >= 300:
+        result = {
+            "error_status": response.status_code,
+            "error_body": response.text,
+            "sent_payload": payload,
+        }
+        if auto_created_fields:
+            result["auto_created_fields"] = auto_created_fields
+        return result
+
+    body = {}
+    if response.status_code in (201, 204):
+        try:
+            body = response.json()
+        except Exception:
+            pass
+    else:
+        body = response.json()
+
+    result = {"status": "created", "response": body, "sent_payload": payload}
+    if auto_created_fields:
+        result["auto_created_fields"] = auto_created_fields
+    return result
+
+
+def get_activations(
+    oauth_session: OAuthSession,
+    batch_size: int = 25,
+    offset: int = 0,
+    order_by: str = "createddate desc",
+) -> Dict[str, Any]:
+    """
+    Get all segment activations from Data Cloud.
+
+    Returns activations with details like activation target, status,
+    refresh type, associated segment, and publish status.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/activations"
+    params = {
+        "batchSize": batch_size,
+        "offset": offset,
+        "orderByExpression": f"[{order_by}]",
+    }
+
+    logger.info(f"Fetching activations from {url}")
+    response = requests.get(url, headers=headers, params=params, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def get_activation_by_id(
+    oauth_session: OAuthSession,
+    activation_id: str,
+) -> Dict[str, Any]:
+    """
+    Get details of a specific activation by ID.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/activations/{activation_id}"
+
+    logger.info(f"Fetching activation {activation_id} from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def delete_activation(
+    oauth_session: OAuthSession,
+    activation_id: str,
+) -> Dict[str, Any]:
+    """
+    Delete a specific activation by ID.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/activations/{activation_id}"
+
+    logger.info(f"Deleting activation {activation_id} at {url}")
+    response = requests.delete(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "deleted", "activationId": activation_id}
+    return response.json()
+
+
+def update_activation(
+    oauth_session: OAuthSession,
+    activation_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Update a specific activation by ID (PATCH).
+
+    Supports fields like refreshType, relatedDmoFiltersConfig,
+    shouldExcludeDeletes, shouldExcludeUpdates, and staticDataConfig.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/activations/{activation_id}"
+
+    logger.info(f"Updating activation {activation_id} at {url}")
+    response = requests.patch(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "updated", "activationId": activation_id}
+    return response.json()
+
+
+def get_ssot_connectors(oauth_session: OAuthSession) -> Dict[str, Any]:
+    """
+    Get all SSOT connectors (activation targets, marketing connectors, etc.)
+    via the /ssot/connectors endpoint.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/connectors"
+
+    logger.info(f"Fetching SSOT connectors from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def get_ssot_connector_metadata(
+    oauth_session: OAuthSession,
+    connector_type: str,
+) -> Dict[str, Any]:
+    """
+    Get metadata for a specific SSOT connector type.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/connectors/{connector_type}"
+
+    logger.info(f"Fetching connector metadata for {connector_type} from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def get_data_action_targets(oauth_session: OAuthSession) -> Dict[str, Any]:
+    """
+    Get all data action targets.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets"
+
+    logger.info(f"Fetching data action targets from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def get_data_action_target_by_name(
+    oauth_session: OAuthSession,
+    api_name: str,
+) -> Dict[str, Any]:
+    """
+    Get a specific data action target by API name.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets/{api_name}"
+
+    logger.info(f"Fetching data action target {api_name} from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def create_data_action_target(
+    oauth_session: OAuthSession,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Create a data action target (Core, MarketingCloud, or WebHook).
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets"
+
+    logger.info(f"Creating data action target: {payload.get('apiName', 'unknown')}")
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "created", "apiName": payload.get("apiName")}
+    return response.json()
+
+
+def delete_data_action_target(
+    oauth_session: OAuthSession,
+    api_name: str,
+) -> Dict[str, Any]:
+    """
+    Delete a data action target by API name.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets/{api_name}"
+
+    logger.info(f"Deleting data action target {api_name} at {url}")
+    response = requests.delete(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "deleted", "apiName": api_name}
+    return response.json()
+
+
+def get_data_actions(oauth_session: OAuthSession) -> Dict[str, Any]:
+    """
+    Get all data actions from Data Cloud.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-actions"
+
+    logger.info(f"Fetching data actions from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def create_data_action(
+    oauth_session: OAuthSession,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Create a data action in Data Cloud.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-actions"
+
+    logger.info(f"Creating data action: {payload.get('dataActionName', 'unknown')}")
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "created", "dataActionName": payload.get("dataActionName")}
+    return response.json()
+
+
+def get_data_graph_metadata(oauth_session: OAuthSession) -> Dict[str, Any]:
+    """
+    Get metadata for all data graphs.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-graphs/metadata"
+
+    logger.info(f"Fetching data graph metadata from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def create_data_lake_object(
+    oauth_session: OAuthSession,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Create a Data Lake Object (DLO) in Data Cloud.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-lake-objects"
+
+    logger.info(f"Creating DLO: {payload.get('name', 'unknown')}")
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "created", "name": payload.get("name")}
+    return response.json()
+
+
+def update_data_lake_object(
+    oauth_session: OAuthSession,
+    dlo_identifier: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Update a Data Lake Object (DLO) by record ID or developer name (PATCH).
+    Can update label and add new fields.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-lake-objects/{dlo_identifier}"
+
+    logger.info(f"Updating DLO {dlo_identifier} at {url}")
+    response = requests.patch(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "updated", "dlo": dlo_identifier}
+    return response.json()
+
+
+def delete_data_lake_object(
+    oauth_session: OAuthSession,
+    dlo_identifier: str,
+) -> Dict[str, Any]:
+    """
+    Delete a Data Lake Object (DLO) by record ID or developer name.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-lake-objects/{dlo_identifier}"
+
+    logger.info(f"Deleting DLO {dlo_identifier} at {url}")
+    response = requests.delete(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "deleted", "dlo": dlo_identifier}
+    return response.json()
+
+
+def get_data_spaces(oauth_session: OAuthSession) -> Dict[str, Any]:
+    """
+    Get all data spaces.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces"
+
+    logger.info(f"Fetching data spaces from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def get_data_space_by_id(
+    oauth_session: OAuthSession,
+    id_or_name: str,
+) -> Dict[str, Any]:
+    """
+    Get a specific data space by ID or name.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}"
+
+    logger.info(f"Fetching data space {id_or_name} from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def update_data_space(
+    oauth_session: OAuthSession,
+    id_or_name: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Update a data space by ID or name (PATCH).
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}"
+
+    logger.info(f"Updating data space {id_or_name} at {url}")
+    response = requests.patch(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "updated", "dataSpace": id_or_name}
+    return response.json()
+
+
+def get_data_space_members(
+    oauth_session: OAuthSession,
+    id_or_name: str,
+) -> Dict[str, Any]:
+    """
+    Get all members of a data space.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}/members"
+
+    logger.info(f"Fetching members for data space {id_or_name} from {url}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def get_data_space_member(
+    oauth_session: OAuthSession,
+    id_or_name: str,
+    member_object_name: str,
+) -> Dict[str, Any]:
+    """
+    Get a specific member from a data space by object name.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}/members/{member_object_name}"
+
+    logger.info(f"Fetching member {member_object_name} from data space {id_or_name}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def create_data_transform(
+    oauth_session: OAuthSession,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Create a data transform (BATCH or STREAMING) in Data Cloud.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-transforms"
+
+    logger.info(f"Creating data transform: {payload.get('name', 'unknown')}")
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "created", "name": payload.get("name")}
+    return response.json()
+
+
+def update_data_transform(
+    oauth_session: OAuthSession,
+    name_or_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Update a data transform by name or ID (PUT — full replacement).
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{name_or_id}"
+
+    logger.info(f"Updating data transform {name_or_id} at {url}")
+    response = requests.put(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "updated", "dataTransform": name_or_id}
+    return response.json()
+
+
+def delete_data_transform(
+    oauth_session: OAuthSession,
+    name_or_id: str,
+) -> Dict[str, Any]:
+    """
+    Delete a data transform by name or ID.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{name_or_id}"
+
+    logger.info(f"Deleting data transform {name_or_id} at {url}")
+    response = requests.delete(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "deleted", "dataTransform": name_or_id}
+    return response.json()
+
+
+def get_data_transform_run_history(
+    oauth_session: OAuthSession,
+    name_or_id: str,
+) -> Dict[str, Any]:
+    """
+    Get run history for a specific data transform.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{name_or_id}/run-history"
+
+    logger.info(f"Fetching run history for data transform {name_or_id}")
+    response = requests.get(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    return response.json()
+
+
+def update_segment(
+    oauth_session: OAuthSession,
+    segment_api_name: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Update a segment by API name (PATCH).
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/segments/{segment_api_name}"
+
+    logger.info(f"Updating segment {segment_api_name} at {url}")
+    response = requests.patch(url, json=payload, headers=headers, timeout=120)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "updated", "segment": segment_api_name}
+    return response.json()
+
+
+def delete_segment(
+    oauth_session: OAuthSession,
+    segment_api_name: str,
+) -> Dict[str, Any]:
+    """
+    Delete a segment by API name.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/segments/{segment_api_name}"
+
+    logger.info(f"Deleting segment {segment_api_name} at {url}")
+    response = requests.delete(url, headers=headers, timeout=60)
+
+    _handle_error_response(response)
+
+    if response.status_code == 204:
+        return {"status": "deleted", "segment": segment_api_name}
     return response.json()
