@@ -1,17 +1,19 @@
-# :zap: FLASH
+# :zap: FLASH(Framework Layer for Agentic Serverless Headless Data360)
 
-A Headless, API-Native & Agentic AI Framework for Salesforce Data360
+
+ :ai-bot:A Headless, API-Native & Agentic AI Framework for Salesforce Data360
 
 FLASH is a headless, API-native, agentic AI framework that transforms how Salesforce Data360 Implementations are delivered and operated.
 Built on the custom Model Context Protocol (MCP), FLASH exposes 60+ intelligent APIs and operational tools that allow AI agents to autonomously execute Data360 workflows through natural language — eliminating dependency on manual UI-driven configuration.
 From ingestion and modeling to segmentation, querying, and insights generation, FLASH enables organizations to operate Salesforce Data360 through a scalable headless and agentic architecture, accessible from:
 
-* Cursor 
-* Claude Desktop 
-* Agentforce Vibes
-* Custom AI Agents 
+* :computer: Cursor 
+* :desktop_computer: Claude Desktop 
+* :gear: Agentforce 
+* :ai-bot:Custom AI Agents 
 
 FLASH creates a reusable AI execution layer that standardizes, accelerates, and simplifies Data 360 operations across the enterprise.
+
 
 
 ---
