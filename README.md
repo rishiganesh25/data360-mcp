@@ -1,8 +1,18 @@
-# Data Cloud MCP Server
+# FLASH
 
-A Model Context Protocol (MCP) server for **Salesforce Data Cloud** that exposes 60+ tools to LLM clients like Claude Code, Cursor, Claude Desktop, and any MCP-compatible host.
+A Headless, API-Native & Agentic AI Framework for Salesforce Data360
 
-Query Data Cloud with SQL, manage data streams, create segments and calculated insights, explore the data model, and more — all from natural language in your AI coding assistant.
+FLASH is a headless, API-native, agentic AI framework that transforms how Salesforce Data360 Implementations are delivered and operated.
+Built on the custom Model Context Protocol (MCP), FLASH exposes 60+ intelligent APIs and operational tools that allow AI agents to autonomously execute Data360 workflows through natural language — eliminating dependency on manual UI-driven configuration.
+From ingestion and modeling to segmentation, querying, and insights generation, FLASH enables organizations to operate Salesforce Data360 through a scalable headless and agentic architecture, accessible from:
+
+* Cursor 
+* Claude Desktop 
+* Agentforce Vibes
+* Custom AI Agents 
+
+FLASH creates a reusable AI execution layer that standardizes, accelerates, and simplifies Data 360 operations across the enterprise.
+
 
 ---
 
