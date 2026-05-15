@@ -1,430 +1,234 @@
-# :zap: FLASH(Framework Layer for Agentic Serverless Headless Data360)
+# Data Cloud MCP Server
 
-A Model Context Protocol (MCP) server for **Salesforce Data360** that exposes 30+ tools to AI assistants like Cursor, Claude Code, and Claude Desktop.
+A Model Context Protocol (MCP) server for **Salesforce Data Cloud** that exposes 60+ tools to LLM clients like Claude Code, Cursor, Claude Desktop, and any MCP-compatible host.
 
-Query Data Cloud with SQL, manage data streams, create segments and calculated insights, explore the data model, and more — all from natural language in your AI assistant.
+Query Data Cloud with SQL, manage data streams, create segments and calculated insights, explore the data model, and more — all from natural language in your AI coding assistant.
 
 ---
 
 ## Table of Contents
 
-1. [Quick Start (Cursor — Recommended)](#quick-start-cursor--recommended)
-2. [Detailed Setup Guide](#detailed-setup-guide)
-   - [Part A: Install Python (one-time)](#part-a-install-python-one-time)
-   - [Part B: Create a Connected App in Salesforce](#part-b-create-a-connected-app-in-salesforce)
-   - [Part C: Install the MCP Server](#part-c-install-the-mcp-server)
-   - [Part D: Add the Server to Cursor](#part-d-add-the-server-to-cursor)
-   - [Part E: First Run — Authenticate with Salesforce](#part-e-first-run--authenticate-with-salesforce)
+1. [Prerequisites](#prerequisites)
+2. [Step-by-Step Setup](#step-by-step-setup)
 3. [Verify It Works](#verify-it-works)
 4. [Tool Catalog](#tool-catalog)
-5. [Setup for Other Clients](#setup-for-other-clients)
-6. [Configuration Reference](#configuration-reference)
-7. [Architecture](#architecture)
-8. [Security](#security)
-9. [Troubleshooting](#troubleshooting)
+5. [Configuration Reference](#configuration-reference)
+6. [Architecture](#architecture)
+7. [Security](#security)
+8. [Troubleshooting](#troubleshooting)
 
 ---
 
-## Quick Start (Cursor — Recommended)
+## Prerequisites
 
-If you already have **Python 3.10+** installed and a **Salesforce Connected App** ready (with your Consumer Key and Secret), you can set up in under 2 minutes.
+Before starting, make sure you have:
 
-Open a terminal in Cursor (`Ctrl+`` ` or `Cmd+`` `) and run:
+| Requirement | How to check | Install if missing |
+|---|---|---|
+| Python 3.10 or newer (3.13 recommended) | `python3 --version` | [python.org/downloads](https://www.python.org/downloads/) |
+| pip (Python package manager) | `pip3 --version` | Comes with Python; or `python3 -m ensurepip` |
+| git | `git --version` | [git-scm.com](https://git-scm.com/) |
+| A Salesforce org with **Data Cloud enabled** | Setup > Data Cloud | Contact your Salesforce admin |
+| A Salesforce user with Data Cloud permissions | — | Assign `Customer Data Platform Admin` permission set |
+
+---
+
+## Step-by-Step Setup
+
+Follow these steps in order. The entire setup takes about 15 minutes.
+
+---
+
+### Step 1: Clone the Repository
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rishiganesh25/data360-mcp/main/install.sh | bash
+git clone https://github.com/rishiganesh25/data360-mcp.git
+cd data360-mcp
 ```
 
-The script will:
-1. Clone the repo to `~/.data360-mcp`
-2. Create a Python virtual environment and install dependencies
-3. Ask for your Consumer Key and Consumer Secret
-4. Print the JSON config to paste into Cursor
+---
 
-Then paste the JSON into **Cursor Settings > MCP**, restart Cursor, and you're done.
+### Step 2: Create a Python Virtual Environment
 
-> **Don't have Python or a Connected App yet?** Follow the [Detailed Setup Guide](#detailed-setup-guide) below — it walks through everything from scratch.
+```bash
+python3 -m venv .venv
+```
+
+Activate it:
+
+```bash
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows (PowerShell)
+.\.venv\Scripts\Activate.ps1
+
+# Windows (cmd)
+.\.venv\Scripts\activate.bat
+```
+
+You should see `(.venv)` in your terminal prompt.
 
 ---
 
-## Detailed Setup Guide
+### Step 3: Install Dependencies
 
-This guide assumes you are starting from zero. Every step is performed inside **Cursor** and your **browser**. No prior terminal experience needed.
+```bash
+pip install -r requirements.txt
+```
 
-**Total time**: ~15 minutes
-
----
-
-### Part A: Install Python (one-time)
-
-You only need to do this once. If you already have Python, skip to [Part B](#part-b-create-a-connected-app-in-salesforce).
-
-<details>
-<summary><strong>How to check if Python is already installed</strong></summary>
-
-1. Open Cursor
-2. Open the terminal: press **Cmd + `** (Mac) or **Ctrl + `** (Windows/Linux) — that's the backtick key, top-left of your keyboard next to the `1` key
-3. Type this and press Enter:
-   ```bash
-   python3 --version
-   ```
-4. If you see something like `Python 3.12.4`, you're good — skip to Part B
-5. If you see `command not found`, follow the install steps below
-
-</details>
-
-#### Installing Python
-
-1. Open your browser and go to **https://www.python.org/downloads/**
-2. Click the big yellow **"Download Python 3.x.x"** button
-3. Open the downloaded file and follow the installer:
-   - **Mac**: Double-click the `.pkg` file. Click Continue through each step, then Install
-   - **Windows**: Run the `.exe` file. **CHECK THE BOX** that says **"Add Python to PATH"** (this is critical!). Then click "Install Now"
-4. Once installed, go back to Cursor's terminal and verify:
-   ```bash
-   python3 --version
-   ```
-   You should now see `Python 3.x.x`. If you're on Windows and this doesn't work, close and reopen Cursor, then try again.
+This installs the MCP SDK, requests, pydantic, and other required packages.
 
 ---
 
-### Part B: Create a Connected App in Salesforce
+### Step 4: Verify the Server Can Start
 
-The MCP server needs permission to talk to your Salesforce org. You do this by creating a "Connected App" — think of it as an API key for your org.
+```bash
+python server.py
+```
 
-> **Who should do this step?** Anyone with Salesforce Admin access. If you don't have admin access, send this section to your Salesforce admin and ask them to do it for you.
+You should see `Starting MCP server` in the output. Press `Ctrl+C` to stop it. This confirms your Python environment is set up correctly.
 
-#### B1: Enable External Client Apps
+---
 
-1. Log in to your Salesforce org in your browser
-2. Click the **gear icon** (top right corner) → **Setup**
-3. In the **Quick Find** search box on the left side, type: **External Client Apps**
-4. Click **Settings** (under "External Client Apps" in the left sidebar)
-5. You'll see two toggles. Turn **both ON**:
-   - ✅ "Allow access to External Client App consumer secrets via REST API"
-   - ✅ "Allow creation of connected apps"
+### Step 5: Enable External Client Apps in Salesforce
+
+1. Log in to your Salesforce org
+2. Click the **gear icon** (top right) > **Setup**
+3. In the **Quick Find** box (left sidebar), type: `External Client Apps`
+4. Click **Settings** under "External Client Apps"
+5. Enable **both** toggles:
+   - "Allow access to External Client App consumer secrets via REST API"
+   - "Allow creation of connected apps"
 6. Click **Save**
 
-> **Can't find "External Client Apps"?** Your org edition may not support it. Try searching for **"App Manager"** in Quick Find instead, and create a Connected App from there — the OAuth settings below are the same.
+---
 
-#### B2: Create the Connected App
+### Step 6: Create a Connected App
 
-1. In Setup, look in the left sidebar for **External Client Apps** and click on it
-2. Click the **New Connected App** button
-3. Fill in these three fields:
+1. In Setup, navigate to **External Client Apps** (left sidebar)
+2. Click **New Connected App**
+3. Fill in the basic information:
 
-   | Field | What to type |
-   |---|---|
-   | Connected App Name | `Data Cloud MCP` |
-   | API Name | Leave as-is (it auto-fills to `Data_Cloud_MCP`) |
-   | Contact Email | Your email address |
+| Field | Value |
+|---|---|
+| Connected App Name | `Data Cloud MCP` |
+| API Name | `Data_Cloud_MCP` (auto-populated) |
+| Contact Email | Your email address |
 
-4. Click **Next**
+4. Click **Next** or scroll down to the API section
 
-#### B3: Enable OAuth and Add Scopes
+---
 
-1. Check the box: **"Enable OAuth Settings"** — this expands a new section
-2. In the **Callback URL** field, paste this exactly (copy-paste, don't type it):
+### Step 7: Configure OAuth on the Connected App
+
+1. Check the box: **"Enable OAuth Settings"**
+
+2. Set the **Callback URL** to exactly:
    ```
    http://localhost:55556/Callback
    ```
-   > ⚠️ **Do NOT use port 55555** — it conflicts with macOS AirPlay. Port 55556 is safe.
+   > **Warning**: Do NOT use port `55555` — it conflicts with macOS AirPlay Receiver and other services.
 
-3. In the **OAuth Scopes** section, you need to add 5 scopes. For each one:
-   - Click the dropdown or search box under "Available OAuth Scopes"
-   - Find the scope in the list
-   - Click **Add** (or the right arrow) to move it to "Selected OAuth Scopes"
+3. Add the following **OAuth Scopes** (click "Add" for each one):
 
-   Add these 5 scopes:
-
-   | Scope to find and add | Why it's needed |
+   | Scope to select | What it enables |
    |---|---|
-   | `Access the identity URL service (id, profile, email, address, phone)` | Identifies who is logging in |
-   | `Manage user data via APIs (api)` | Lets the server call Salesforce APIs |
-   | `Manage Data Cloud profile data (cdp_profile_api)` | Access to Data Cloud streams, segments, graphs |
-   | `Perform ANSI SQL queries on Data Cloud data (cdp_query_api)` | Run SQL queries against your data |
-   | `Perform requests at any time (refresh_token, offline_access)` | Keeps your session alive |
+   | `Access the identity URL service (id, profile, email, address, phone)` | User identity during OAuth |
+   | `Manage user data via APIs (api)` | General Salesforce REST API access |
+   | `Manage Data Cloud profile data (cdp_profile_api)` | Data Cloud Connect API (streams, segments, graphs) |
+   | `Perform ANSI SQL queries on Data Cloud data (cdp_query_api)` | SQL queries against Data Cloud tables |
+   | `Perform requests at any time (refresh_token, offline_access)` | Keeps sessions alive without re-login |
 
-4. Scroll down to **Security Settings** and check all three boxes:
-   - ✅ Require Secret for Web Server Flow
-   - ✅ Require Secret for Refresh Token Flow
-   - ✅ Require Proof Key for Code Exchange (PKCE)
+4. Under **Security Settings**, enable all three:
+
+   | Setting | Value |
+   |---|---|
+   | Require Secret for Web Server Flow | **Yes** (checked) |
+   | Require Secret for Refresh Token Flow | **Yes** (checked) |
+   | Require Proof Key for Code Exchange (PKCE) | **Yes** (checked) |
 
 5. Click **Save**
 
-#### B4: Relax IP Restrictions
+---
 
-1. You should now be on your Connected App's detail page. Click the **Manage** button at the top
+### Step 8: Configure OAuth Policies
+
+1. On your Connected App page, click **Manage** (button at the top)
 2. Click **Edit Policies**
-3. Find the **IP Relaxation** dropdown (under "OAuth Policies") and change it to:
+3. Under **OAuth Policies**, find **IP Relaxation** and change it to:
    ```
    Relax IP restrictions
    ```
 4. Click **Save**
 
-> **Why is this needed?** Without this, Salesforce blocks the login from `localhost`. This is safe — the PKCE flow still requires you to log in via your browser.
-
-#### B5: Copy Your Consumer Key and Secret
-
-1. Go back to **Setup** → search **"External Client Apps"** in Quick Find
-2. Find **Data Cloud MCP** in the list and click on it
-3. Navigate to: **Settings** → **OAuth Settings** → **App Settings**
-4. You'll see two values you need to copy:
-   - **Consumer Key** — click to select it, then copy (Cmd+C / Ctrl+C). Save it somewhere temporarily (a notes app, a sticky note — you'll need it in Part C)
-   - **Consumer Secret** — click **"Click to reveal"**, then copy it. Save it next to the Consumer Key
-
-> ⚠️ **Keep these safe.** They're like a password for your org's API. Never share them in email or chat. Never commit them to git.
-
-> **Note**: Salesforce can take 5-10 minutes to activate a new Connected App. If you get errors later, wait a few minutes and try again.
+> **Why?** Without this, Salesforce blocks OAuth from `localhost` because it doesn't match any trusted IP range. The PKCE flow still requires browser login, so this is safe.
 
 ---
 
-### Part C: Install the MCP Server
+### Step 9: Copy Your Consumer Key and Secret
 
-Now you'll install the server code. Everything in this section happens inside Cursor.
+1. Go to **Setup** > search **"External Client Apps"** in Quick Find
+2. Find **Data Cloud MCP** in the list and click on it
+3. Navigate to: **Settings** > **OAuth Settings** > **App Settings**
+4. Copy the **Consumer Key** — this becomes your `SF_CLIENT_ID`
+5. Click "Click to reveal" next to Consumer Secret and copy it — this becomes your `SF_CLIENT_SECRET`
 
-#### C1: Open a Terminal in Cursor
+> **Important**: Keep these safe. You'll paste them in the next step. Never commit them to git.
 
-1. Open Cursor
-2. Press **Cmd + `** (Mac) or **Ctrl + `** (Windows/Linux) to open the built-in terminal
-3. You should see a terminal panel appear at the bottom of Cursor with a blinking cursor
+> **Note**: Connected App changes can take 5-10 minutes to propagate. If you get errors in Step 12, wait and retry.
 
-> **If you don't see a terminal**: Go to the menu bar → **Terminal** → **New Terminal**
+---
 
-#### C2: Run the Installer
+### Step 10: Configure Your Credentials
 
-Copy-paste this entire command into the terminal and press Enter:
+Back in your terminal, in the `data360-mcp` directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rishiganesh25/data360-mcp/main/install.sh | bash
+cp .env.example .env
 ```
 
-**What you'll see**: The script will print progress messages:
+Open `.env` in any text editor and paste your credentials:
 
-```
-[1/5] Checking prerequisites...
-  python3 (3.12) ✓
-  git ✓
+```bash
+# Required — paste the Consumer Key and Secret from Step 9
+SF_CLIENT_ID=your_consumer_key_here
+SF_CLIENT_SECRET=your_consumer_secret_here
 
-[2/5] Installing to /Users/yourname/.data360-mcp...
-
-[3/5] Setting up Python virtual environment...
-  Dependencies installed ✓
-
-[4/5] Configuring credentials...
+# Optional — change only if needed
+SF_LOGIN_URL=login.salesforce.com
+SF_CALLBACK_URL=http://localhost:55556/Callback
 ```
 
-#### C3: Enter Your Credentials
-
-The script will ask you for two things. Paste the values you saved from Part B:
-
-```
-Enter your Consumer Key (SF_CLIENT_ID): <paste your Consumer Key here>
-Enter your Consumer Secret (SF_CLIENT_SECRET): <paste your Consumer Secret here>
-Login URL [login.salesforce.com]: <press Enter for production, or type test.salesforce.com for sandbox>
+**If you're using a sandbox**, change:
+```bash
+SF_LOGIN_URL=test.salesforce.com
 ```
 
-> **Which Login URL should I use?**
-> - **Production or Developer org**: Just press Enter (the default `login.salesforce.com` is correct)
-> - **Sandbox**: Type `test.salesforce.com`
-> - **Custom My Domain**: Type your domain, e.g. `mycompany.my.salesforce.com`
-
-#### C4: Copy the JSON Config
-
-After entering credentials, the script prints a JSON block. **Select and copy the entire JSON** — you'll paste it in the next step.
-
-It looks like this (with your actual paths filled in):
-
-```json
-{
-  "mcpServers": {
-    "datacloud": {
-      "command": "bash",
-      "args": [
-        "-c",
-        "set -a && source /Users/yourname/.data360-mcp/.env && set +a && cd /Users/yourname/.data360-mcp && .venv/bin/python server.py"
-      ],
-      "disabled": false,
-      "autoApprove": [
-        "query",
-        "list_tables",
-        "describe_table",
-        "list_data_streams",
-        "list_data_model_objects",
-        "list_segments",
-        "list_calculated_insights",
-        "list_data_graphs",
-        "list_retrievers",
-        "list_search_indexes"
-      ]
-    }
-  }
-}
+**If you're using a My Domain org**, change:
+```bash
+SF_LOGIN_URL=your-company.my.salesforce.com
 ```
 
-> **What is `autoApprove`?** These are read-only tools that Cursor will run without asking you "Allow?" every time. This saves clicks. Write operations (like creating segments) will still ask for confirmation.
+Then secure the file:
+
+```bash
+chmod 600 .env
+```
 
 ---
 
-### Part D: Add the Server to Cursor
+### Step 11: Wire It Into Your MCP Client
 
-#### D1: Open Cursor MCP Settings
+Pick the MCP client you're using and follow the config below.
 
-1. Open Cursor Settings: press **Cmd + ,** (Mac) or **Ctrl + ,** (Windows/Linux)
-2. In the left sidebar, scroll down and click **MCP**
-3. You should see the "MCP Servers" section
-
-#### D2: Add the Server
-
-1. Click **"+ Add new global MCP server"**
-2. This opens a JSON file called `mcp.json`
-3. **Delete everything** in this file
-4. **Paste the JSON** you copied from Part C
-5. **Save the file**: press **Cmd + S** (Mac) or **Ctrl + S** (Windows/Linux)
-
-#### D3: Verify It Appears
-
-1. Go back to **Cursor Settings > MCP**
-2. You should see **"datacloud"** in the server list
-3. It may show a yellow/orange indicator while starting up — wait a few seconds
-4. Once it turns **green**, the server is connected and ready
-
-> **If it stays red or shows an error**: Click on the server name to see the error message, then check the [Troubleshooting](#troubleshooting) section.
+> In all examples, replace `/absolute/path/to/data360-mcp` with the **actual full path** where you cloned the repo (e.g., `/Users/yourname/projects/data360-mcp`).
+>
+> If you used a virtual environment (Step 2), replace `python` with `.venv/bin/python` in the command.
 
 ---
 
-### Part E: First Run — Authenticate with Salesforce
-
-The first time you use the server, it needs to log you in to Salesforce via your browser.
-
-#### E1: Ask the Agent Something
-
-1. Open the Cursor AI chat (press **Cmd + L** on Mac, or **Ctrl + L** on Windows/Linux)
-2. Type a simple question like:
-   ```
-   List all tables in Data Cloud
-   ```
-3. Press Enter
-
-#### E2: Authorize in Your Browser
-
-1. **A browser window will open automatically** showing the Salesforce login page
-2. Log in with the Salesforce user that has **Data Cloud permissions**
-3. When Salesforce asks **"Allow access?"** — click **Allow**
-4. You'll see a page that says: **"You can close this window now"**
-5. Close the browser tab and **switch back to Cursor**
-
-#### E3: See the Results
-
-Back in Cursor, the AI chat should now show a list of your Data Cloud tables. If it does, everything is working.
-
-> **You won't need to log in again for ~2 hours.** The token is cached at `~/.dc_mcp_token_cache.json`. When it expires, the browser login will open again automatically — just log in and continue.
-
----
-
-## Verify It Works
-
-Try these prompts in Cursor's AI chat to confirm everything is connected:
-
-| What to type in Cursor chat | What you should see |
-|---|---|
-| *"List all tables in Data Cloud"* | A list of table names (DMOs, DLOs, CIOs) |
-| *"Show me all data streams and their status"* | Streams with Active/Inactive status |
-| *"Describe the ssot__Individual__dlm table"* | Column names and types for the Individual DMO |
-| *"How many segments do I have?"* | A count and list of segment names |
-| *"Run: SELECT COUNT(\*) FROM ssot__Individual__dlm"* | A number showing your record count |
-
-If any of these fail, check the [Troubleshooting](#troubleshooting) section at the bottom.
-
----
-
-## Tool Catalog
-
-The server exposes 30+ tools organized by function. Cursor's AI agent automatically picks the right tool based on what you ask.
-
-### Query & Schema
-
-| Tool | What it does |
-|---|---|
-| `query` | Execute SQL (PostgreSQL dialect) against Data Cloud. Handles long-running queries and pagination automatically. |
-| `list_tables` | List all queryable tables. Filterable via `DEFAULT_LIST_TABLE_FILTER` env var. |
-| `describe_table` | Get column names for a specific table. |
-
-### Data Streams
-
-| Tool | What it does |
-|---|---|
-| `list_data_streams` | All streams with status, source, category, and last refresh date. |
-| `get_data_stream_info` | Detailed configuration for a single stream. |
-| `refresh_stream` | Trigger a manual data refresh. |
-| `create_new_data_stream` | Create a stream from any connector (CRM, S3, GCS, Azure, SFTP, MuleSoft, IngestApi). |
-| `create_ingestion_schema` | Define the schema for an Ingestion API stream. |
-| `delete_stream` | Remove a stream (and optionally its Data Lake Object). |
-| `list_available_connectors` | Discover configured connectors in your org. |
-| `list_connector_objects` | See what source objects a connector offers. |
-| `list_connected_source_objects` | See which objects already have streams (avoid duplicates). |
-
-### Data Model
-
-| Tool | What it does |
-|---|---|
-| `list_data_model_objects` | All DMOs with metadata. |
-| `get_dmo_details` | Fields and relationships for a specific DMO. |
-| `create_custom_dmo` | Create a new custom Data Model Object with custom fields. |
-| `create_custom_dmo_fields` | Add fields to an existing custom DMO. |
-| `delete_custom_dmo_fields` | Remove fields from a custom DMO. |
-| `create_dlo_dmo_mapping` | Map a Data Lake Object to a DMO with pre-flight validation. |
-| `batch_create_dlo_dmo_mappings` | Map multiple DLOs to DMOs in parallel with auto-fix. |
-| `update_dlo_dmo_mapping` | Update an existing field mapping. |
-| `delete_dlo_dmo_mapping` | Remove a DLO-to-DMO mapping. |
-| `list_mappings` | All stream-to-DMO field mappings. |
-| `list_identity_rulesets` | Identity resolution ruleset configuration. |
-
-### Segments
-
-| Tool | What it does |
-|---|---|
-| `list_segments` | All segments in the org. |
-| `create_segment` | Create a segment from a JSON definition. |
-| `create_segment_dbt` | Create a SQL-based segment (automatically discovers field API names). |
-
-### Calculated Insights
-
-| Tool | What it does |
-|---|---|
-| `list_calculated_insights` | All calculated insights. |
-| `create_calculated_insight` | Create a CI from a SQL SELECT expression with inferred dimensions/measures. |
-
-### Data Graphs
-
-| Tool | What it does |
-|---|---|
-| `list_data_graphs` | All data graph definitions. |
-| `create_data_graph` | Create a graph rooted at a primary DMO with nested relationships. |
-| `delete_data_graph` | Delete a data graph by developer name. |
-
-### Retrievers & Search
-
-| Tool | What it does |
-|---|---|
-| `list_retrievers` | All retrievers (system + custom, for RAG use cases). |
-| `list_search_indexes` | All semantic search index definitions. |
-
-### Salesforce REST
-
-| Tool | What it does |
-|---|---|
-| `sf_rest_api` | Make GET/POST/PATCH/DELETE calls to `/services/data/` and `/services/connect/` paths. |
-| `describe_sobject` | Get field metadata for any Salesforce sObject. |
-| `create_sobject_record` | Create a record on any sObject. |
-
----
-
-## Setup for Other Clients
-
-The examples below show how to use the server with other MCP-compatible clients. In all cases, replace `/absolute/path/to/data360-mcp` with the path where the server is installed (the default installer puts it at `~/.data360-mcp`).
-
-### Claude Code (CLI or VS Code Extension)
+#### Option A: Claude Code (CLI or VS Code Extension)
 
 Create or edit `.mcp.json` in your project root (or `~/.claude/mcp.json` for global access):
 
@@ -443,7 +247,40 @@ Create or edit `.mcp.json` in your project root (or `~/.claude/mcp.json` for glo
 }
 ```
 
-### Claude Desktop
+---
+
+#### Option B: Cursor
+
+Open **Cursor Settings > MCP > Add new global MCP server**, or edit `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "datacloud": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "set -a && source /absolute/path/to/data360-mcp/.env && set +a && cd /absolute/path/to/data360-mcp && .venv/bin/python server.py"
+      ],
+      "disabled": false,
+      "autoApprove": [
+        "list_tables",
+        "describe_table",
+        "list_data_streams",
+        "list_data_model_objects",
+        "list_segments",
+        "list_calculated_insights"
+      ]
+    }
+  }
+}
+```
+
+> **Tip**: `autoApprove` lists read-only tools that won't prompt for confirmation each time.
+
+---
+
+#### Option C: Claude Desktop
 
 Edit your config file:
 
@@ -466,6 +303,188 @@ Edit your config file:
 
 ---
 
+### Step 12: Authenticate (First Run)
+
+1. **Restart your MCP client** (or reload/refresh the MCP server list)
+2. **Ask it something** — for example: *"List all tables in Data Cloud"*
+3. **A browser window will open** showing the Salesforce login page
+4. **Sign in** with the Salesforce user that has Data Cloud permissions
+5. **Authorize the app** when Salesforce asks "Allow access?"
+6. The browser will show: **"You can close this window now"**
+7. **Switch back to your MCP client** — the response should now appear
+
+The access token is cached at `~/.dc_mcp_token_cache.json` and lasts ~110 minutes. When it expires, the browser login will open again automatically — no action needed from you.
+
+---
+
+## Verify It Works
+
+Try these prompts in your MCP client to confirm everything is connected:
+
+| Prompt to try | Expected result |
+|---|---|
+| *"List all tables in Data Cloud"* | Returns a list of table names (DMOs, DLOs, CIOs) |
+| *"Show me all data streams and their status"* | Returns streams with Active/Inactive status |
+| *"Describe the ssot__Individual__dlm table"* | Returns column names for the Individual DMO |
+| *"How many segments do I have?"* | Returns a count and list of segment names |
+| *"Run this SQL: SELECT COUNT(*) FROM ssot__Individual__dlm"* | Returns a row count |
+
+If any of these fail, check the [Troubleshooting](#troubleshooting) section.
+
+---
+
+## Tool Catalog
+
+### Query & Schema (3 tools)
+
+| Tool | What it does |
+|---|---|
+| `query` | Execute SQL (PostgreSQL dialect) against Data Cloud. Handles long-running queries and pagination automatically. |
+| `list_tables` | List all queryable tables. Filterable via `DEFAULT_LIST_TABLE_FILTER` env var. |
+| `describe_table` | Get column names for a specific table. |
+
+### Data Streams (6 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_data_streams` | All streams with status, source, category, and last refresh date. |
+| `get_data_stream_info` | Detailed configuration for a single stream. |
+| `refresh_stream` | Trigger a manual data refresh. |
+| `create_new_data_stream` | Create a stream from any connector (CRM, S3, GCS, Azure, SFTP, MuleSoft, IngestApi). |
+| `create_ingestion_schema` | Define the schema for an Ingestion API stream. |
+| `delete_stream` | Remove a stream (and optionally its Data Lake Object). |
+
+### Data Lake Objects (3 tools)
+
+| Tool | What it does |
+|---|---|
+| `create_dlo` | Create a DLO with fields, category, and optional dataspace filters. |
+| `update_dlo` | Update a DLO's label or add new fields. |
+| `delete_dlo` | Delete a DLO by record ID or developer name. |
+
+### Data Model Objects (5 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_data_model_objects` | All DMOs with metadata. |
+| `get_dmo_details` | Fields and relationships for a specific DMO. |
+| `create_custom_dmo` | Create a fully custom DMO with fields and category. |
+| `create_custom_dmo_fields` | Add custom fields to an existing DMO. |
+| `delete_custom_dmo_fields` | Delete custom fields from a DMO. |
+
+### DLO-DMO Mappings (5 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_mappings` | All stream-to-DMO field mappings. |
+| `create_dlo_dmo_mapping` | Create a mapping with pre-flight validation, auto PK/timestamp injection. |
+| `update_dlo_dmo_mapping` | Update an existing mapping (delete + recreate). |
+| `delete_dlo_dmo_mapping` | Delete a mapping by name or by source/target entity. |
+| `batch_create_dlo_dmo_mappings` | Create multiple mappings in parallel (grouped by DLO to avoid lock contention). |
+
+### Segments (5 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_segments` | All segments in the org. |
+| `create_segment` | Create a segment from a JSON definition. |
+| `create_segment_dbt` | Create a SQL-based segment (automatically discovers field API names). |
+| `update_segment` | Update a segment (definition, schedule, description, etc.). |
+| `delete_segment` | Delete a segment by API name. |
+
+### Activations (4 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_activations` | All segment activations with pagination and ordering. |
+| `get_activation_details` | Full details of a specific activation. |
+| `update_activation` | Update activation settings (refreshType, filters, static data, etc.). |
+| `delete_activation` | Delete an activation by ID. |
+
+### Connectors (5 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_connectors` | All SSOT connectors (activation targets, marketing connectors). |
+| `get_connector_metadata` | Metadata for a specific connector type. |
+| `list_available_connectors` | Data source connectors configured in the org. |
+| `list_connector_objects` | Source objects available in a connector. |
+| `list_connected_source_objects` | Objects that already have streams (avoid duplicates). |
+
+### Data Action Targets (4 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_data_action_targets` | All data action targets (S3, Marketing Cloud, webhook, etc.). |
+| `get_data_action_target` | Details of a specific target by API name. |
+| `create_data_action_target` | Create a target (Core, MarketingCloud, or WebHook). |
+| `delete_data_action_target` | Delete a target by API name. |
+
+### Data Actions (2 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_data_actions` | All data actions configured in Data Cloud. |
+| `create_data_action` | Create a data action triggered by DMO record changes (CREATE/UPDATE/DELETE). |
+
+### Data Spaces (5 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_data_spaces` | All data spaces. |
+| `get_data_space` | Details of a specific data space by ID or name. |
+| `update_data_space` | Update a data space's label and/or description. |
+| `list_data_space_members` | All members (DMOs, DLOs, etc.) in a data space. |
+| `get_data_space_member` | Details of a specific member in a data space. |
+
+### Data Transforms (4 tools)
+
+| Tool | What it does |
+|---|---|
+| `create_data_transform` | Create a transform (BATCH with STL nodes, or STREAMING with SQL). |
+| `update_data_transform` | Full replacement update of a transform (PUT). |
+| `delete_data_transform` | Delete a transform by name or ID. |
+| `get_data_transform_run_history` | Run history with execution statuses and timestamps. |
+
+### Calculated Insights (2 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_calculated_insights` | All calculated insights. |
+| `create_calculated_insight` | Create a CI from a SQL SELECT expression with inferred dimensions/measures. |
+
+### Data Graphs (4 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_data_graphs` | All data graph definitions. |
+| `get_data_graphs_metadata` | Full metadata for all data graphs (structure, DMOs, relationships). |
+| `create_data_graph` | Create a graph rooted at a primary DMO with nested relationships. |
+| `delete_data_graph` | Delete a data graph by developer name. |
+
+### Identity Resolution (1 tool)
+
+| Tool | What it does |
+|---|---|
+| `list_identity_rulesets` | Identity resolution ruleset configuration. |
+
+### Retrievers & Search (2 tools)
+
+| Tool | What it does |
+|---|---|
+| `list_retrievers` | All retrievers (system + custom, for RAG use cases). |
+| `list_search_indexes` | All semantic search index definitions. |
+
+### Salesforce REST (3 tools)
+
+| Tool | What it does |
+|---|---|
+| `sf_rest_api` | Make GET/POST/PATCH/DELETE calls to `/services/data/` and `/services/connect/` paths. |
+| `describe_sobject` | Get field metadata for any Salesforce sObject. |
+| `create_sobject_record` | Create a record on any sObject. |
+
+---
+
 ## Configuration Reference
 
 | Environment Variable | Required | Default | Description |
@@ -482,7 +501,7 @@ Edit your config file:
 
 ```mermaid
 flowchart LR
-    Client["MCP Client<br/>(Cursor / Claude Code / Claude Desktop)"] -->|stdio| Server["server.py<br/>FastMCP"]
+    Client["MCP Client<br/>(Claude Code / Cursor / Claude Desktop)"] -->|stdio| Server["server.py<br/>FastMCP"]
     Server --> OAuth["oauth.py<br/>OAuth 2.0 + PKCE"]
     Server --> SQL["connect_api_dc_sql.py<br/>SQL query + pagination"]
     Server --> DC["connect_api_datacloud.py<br/>Connect REST API"]
@@ -508,38 +527,19 @@ flowchart LR
 
 ## Troubleshooting
 
-### Server won't start / stays red in Cursor
-
-| What you see | What to do |
+| Problem | Cause & Fix |
 |---|---|
-| Server shows red dot in Cursor MCP settings | Click on the server name to see the error. Most common cause: Python path is wrong. Open the terminal in Cursor and run `python3 --version` to make sure Python is installed. |
-| `ModuleNotFoundError: No module named 'mcp'` | Dependencies aren't installed. Run this in the terminal: `cd ~/.data360-mcp && source .venv/bin/activate && pip install -r requirements.txt` |
-| `Connection refused` | The server crashed on startup. Run `cd ~/.data360-mcp && .venv/bin/python server.py` in the terminal to see the error message. |
-
-### Authentication errors
-
-| What you see | What to do |
-|---|---|
-| `invalid_client_id` after browser login | Your Consumer Key doesn't match. Go to **Setup > External Client Apps > Data Cloud MCP > Settings > OAuth Settings > App Settings** and re-copy the Consumer Key. Also make sure `SF_LOGIN_URL` in your `.env` points to the right org (`login.salesforce.com` vs `test.salesforce.com`). **New Connected Apps can take 5-10 minutes to activate** — wait and try again. |
-| `redirect_uri_mismatch` | The Callback URL in the Connected App must be **exactly** `http://localhost:55556/Callback` — case-sensitive, no trailing slash. Go to the Connected App in Setup and fix it. |
-| `PKCE challenge failed` | Go to the Connected App in Setup and make sure "Require Proof Key for Code Exchange" is checked. If you just changed it, wait 10 minutes. |
-| Browser doesn't open for login | You're running in a headless/remote environment (like a cloud VM with no browser). Run the server on a machine that has a browser. |
-| `Address already in use` on port 55556 | Another process is using that port. In the terminal, run `lsof -i :55556` to find it. You can kill it, or change the port in both your `.env` file (`SF_CALLBACK_URL`) and the Connected App in Salesforce. |
-
-### API and permission errors
-
-| What you see | What to do |
-|---|---|
-| `403 Forbidden` from Data Cloud APIs | The logged-in Salesforce user doesn't have Data Cloud permissions. In Salesforce Setup, go to **Permission Sets** and assign **Customer Data Platform Admin** to your user. |
-| `cdp_query_api not enabled` | The Connected App is missing OAuth scopes. Edit it in Setup, add all 5 scopes from [Part B3](#b3-enable-oauth-and-add-scopes), save, and wait ~10 minutes. |
-| `401 Unauthorized` mid-session | Token expired and auto-refresh failed. Fix: delete the token cache and re-authenticate. In the terminal, run: `rm ~/.dc_mcp_token_cache.json` — then try any query again and re-login when the browser opens. |
-
-### Tools not showing up
-
-| What you see | What to do |
-|---|---|
-| No tools appear in Cursor | Click the **refresh icon** next to the server in **Cursor Settings > MCP**. If still nothing, restart Cursor completely (Cmd+Q / Ctrl+Q, then reopen). |
-| Tools appear but return errors | Make sure you completed the Salesforce login (Part E). If the browser opened but you didn't click "Allow", try the query again. |
+| `Address already in use` on port 55556 | Another process is using that port. Run `lsof -i :55556` to find it and kill it, or change `SF_CALLBACK_URL` (and the Connected App) to a different port. |
+| `invalid_client_id` after browser login | Your `SF_CLIENT_ID` doesn't match a Connected App in the org you're logging into. Double-check the Consumer Key and that `SF_LOGIN_URL` points to the correct org. Wait 10 minutes if you just created the app. |
+| `redirect_uri_mismatch` | The Callback URL in the Connected App must be **exactly** `http://localhost:55556/Callback` (case-sensitive, no trailing slash). |
+| `403 Forbidden` from Data Cloud APIs | The logged-in user doesn't have Data Cloud permissions. Assign the **Customer Data Platform Admin** permission set in Setup > Permission Sets. |
+| `cdp_query_api not enabled` | The Connected App is missing required scopes. Edit it in Setup, add all 5 scopes from Step 7, save, and wait ~10 minutes for propagation. |
+| Tools not showing in Cursor | Click the refresh/reload icon in Cursor MCP settings. Verify that `python` resolves to a Python with `mcp[cli]` installed (run `python -m mcp --version`). |
+| `401 Unauthorized` mid-session | Token expired and auto-refresh failed. Delete `~/.dc_mcp_token_cache.json` and trigger any tool call to re-authenticate. |
+| `ModuleNotFoundError: No module named 'mcp'` | Dependencies not installed. Run `pip install -r requirements.txt` in your activated venv. |
+| Browser doesn't open for login | You're running in a headless/remote environment. Run the server on a machine with a browser, or pre-authenticate on a desktop machine first. |
+| `Connection refused` in MCP client | The server isn't running or crashed on startup. Check the path in your MCP config and try `python server.py` manually to see error output. |
+| `PKCE challenge failed` | Make sure "Require Proof Key for Code Exchange" is checked in the Connected App. If you changed it after creation, wait 10 minutes. |
 
 ---
 
@@ -549,7 +549,6 @@ The [examples/](examples/) folder has standalone scripts using the same OAuth + 
 
 ```bash
 # Count active data streams
-cd ~/.data360-mcp && source .venv/bin/activate
 python examples/count_streams.py
 
 # Dump org DMO metadata
