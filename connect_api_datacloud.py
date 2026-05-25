@@ -647,6 +647,291 @@ def get_connector_source_objects(
     return response.json()
 
 
+def list_connector_instances(
+    oauth_session: OAuthSession,
+    include_config: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    List configured connector instances in the org via the Tooling API
+    (MktDataConnection sObject). Unlike list_connectors (which returns the
+    connector type catalog), this returns the actual configured instances —
+    e.g. EDC_Snowflake, DIGITAL_Snowflake, na_ggp_data360, UploadedFiles, etc.
+
+    Args:
+        include_config: If True, fetch each record individually to expand
+            the Metadata blob (account URL, warehouse, bucket, etc.).
+            Credentials are masked by Salesforce regardless.
+
+    Returns:
+        List of dicts with keys: id, name, fullName, connectorType,
+        connectionMethod, status, isActive, createdDate, lastModifiedDate,
+        and (when include_config=True) parameters and credentialNames.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    soql = (
+        "SELECT Id,MasterLabel,ConnectionMethod,IsActivityEnabled,"
+        "IsSentosEnabled,ShouldAutoCreatePolicies,CreatedDate,LastModifiedDate "
+        "FROM MktDataConnection ORDER BY MasterLabel"
+    )
+    list_url = f"{base_url}/services/data/v63.0/tooling/query/?q={requests.utils.quote(soql, safe=',+')}"
+
+    logger.info("Fetching MktDataConnection instances via Tooling API")
+    response = requests.get(list_url, headers=headers, timeout=60)
+    _handle_error_response(response)
+    records = response.json().get("records", [])
+
+    results: List[Dict[str, Any]] = []
+    for rec in records:
+        entry = {
+            "id": rec.get("Id"),
+            "name": rec.get("MasterLabel"),
+            "connectionMethod": rec.get("ConnectionMethod"),
+            "isActivityEnabled": rec.get("IsActivityEnabled"),
+            "createdDate": rec.get("CreatedDate"),
+            "lastModifiedDate": rec.get("LastModifiedDate"),
+        }
+        if include_config:
+            detail_url = (
+                f"{base_url}/services/data/v63.0/tooling/sobjects/"
+                f"MktDataConnection/{rec['Id']}"
+            )
+            detail_resp = requests.get(detail_url, headers=headers, timeout=60)
+            if detail_resp.status_code == 200:
+                detail = detail_resp.json()
+                metadata = detail.get("Metadata") or {}
+                entry["fullName"] = detail.get("FullName")
+                entry["connectorType"] = metadata.get("connectorName")
+                entry["status"] = metadata.get("connectionStatus")
+                entry["isActive"] = (
+                    str(metadata.get("connectionStatus", "")).upper() == "ACTIVE"
+                )
+                entry["parameters"] = {
+                    p.get("paramName"): p.get("value")
+                    for p in (metadata.get("parameters") or [])
+                    if p.get("paramName")
+                }
+                entry["credentialNames"] = [
+                    c.get("credentialName")
+                    for c in (metadata.get("credentials") or [])
+                    if c.get("credentialName")
+                ]
+            else:
+                entry["error"] = (
+                    f"Failed to fetch metadata for {rec.get('MasterLabel')}: "
+                    f"HTTP {detail_resp.status_code}"
+                )
+        results.append(entry)
+    return results
+
+
+def list_connection_source_objects(
+    oauth_session: OAuthSession,
+    connection_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Browse source objects (tables/views) for a configured connector instance,
+    using the live `/ssot/connections/{id}/objects` endpoint. Works for
+    BYOL/Zero-Copy connectors (Snowflake, BigQuery) which the older
+    `/ssot/data-connectors/{name}/source-objects` path 404s on.
+
+    Returns a list of `{name, objectType, attributes: {database, schema, inUse}}`.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    url = (
+        f"{base_url}/services/data/v63.0/ssot/connections/"
+        f"{connection_id}/objects"
+    )
+    logger.info(f"Browsing source objects for connection '{connection_id}'")
+    response = requests.post(url, json={}, headers=headers, timeout=60)
+    _handle_error_response(response)
+    body = response.json()
+    return body.get("objects", body)
+
+
+def list_connection_databases(
+    oauth_session: OAuthSession,
+    connection_id: str,
+) -> List[str]:
+    """
+    List databases visible to a 3-level connector instance (e.g. Snowflake).
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    url = (
+        f"{base_url}/services/data/v63.0/ssot/connections/"
+        f"{connection_id}/databases"
+    )
+    response = requests.post(url, json={}, headers=headers, timeout=60)
+    _handle_error_response(response)
+    body = response.json()
+    return body.get("databases", body)
+
+
+def describe_connection_source_object(
+    oauth_session: OAuthSession,
+    connection_id: str,
+    object_name: str,
+    database: str,
+    schema: str,
+) -> Dict[str, Any]:
+    """
+    Describe the column schema of a source object on a 3-level connector
+    (Snowflake/BigQuery). Returns:
+      {fields: [{name, type, originalType, format?}], primaryKeys: [...], advancedAttributes, incrementalExtractAttributes}
+
+    NOTE: Body must use the key `advancedAttributes` (NOT `database` directly,
+    NOT `objectAttributes`, etc.) — the field-describe parser is locked to that key.
+    """
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    url = (
+        f"{base_url}/services/data/v63.0/ssot/connections/"
+        f"{connection_id}/objects/{object_name}/fields"
+    )
+    body = {"advancedAttributes": {"database": database, "schema": schema}}
+    response = requests.post(url, json=body, headers=headers, timeout=60)
+    _handle_error_response(response)
+    return response.json()
+
+
+def create_zero_copy_data_stream(
+    oauth_session: OAuthSession,
+    name: str,
+    connector_name: str,
+    database: str,
+    schema: str,
+    object_name: str,
+    fields: List[Dict[str, Any]],
+    category: str = "Other",
+    data_space: str = "default",
+    refresh_mode: str = "TOTAL_REPLACE",
+    event_time_field: Optional[str] = None,
+    label: Optional[str] = None,
+    dll_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a zero-copy / BYOL (federated) data stream against a 3-level
+    connector instance such as Snowflake or BigQuery. Data stays in the
+    source — Data Cloud queries it in place via Direct_Access.
+
+    Args:
+        name: Stream API name (no spaces).
+        connector_name: Connector instance name (e.g. 'EDC_Snowflake'),
+            NOT the MktDataConnection Id.
+        database / schema / object_name: 3-level source coordinates.
+        fields: List of dicts with keys:
+            - name: target DLO field name (lowercase recommended)
+            - label: source column header (typically uppercase, matches Snowflake column)
+            - dataType: 'Text' | 'Number' | 'DateTime' | 'Date' | 'Boolean'
+            - isPrimaryKey: bool
+            - format (optional): for Date types, e.g. 'MM/dd/yyyy'
+        category: 'Profile' | 'Engagement' | 'Other' (default Other for snapshot tables)
+        refresh_mode: 'TOTAL_REPLACE' (snapshot/full refresh) | 'UPSERT'
+        event_time_field: Required when category='Engagement' — DLO field name (target).
+        label: Display label (defaults to `name`).
+        dll_name: Override DLO API name; defaults to `{name}__dll`.
+
+    Returns the API response from POST /ssot/data-streams.
+    """
+    if not fields:
+        raise ValueError("fields is required for zero-copy data streams")
+    if category == "Engagement" and not event_time_field:
+        raise ValueError("event_time_field is required for Engagement category streams")
+
+    base_url = oauth_session.get_instance_url()
+    token = oauth_session.get_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    label = label or name
+    dlo_name = dll_name or f"{name}__dll"
+
+    dlf_reps: List[Dict[str, Any]] = []
+    source_fields: List[Dict[str, Any]] = []
+    mappings: List[Dict[str, Any]] = []
+
+    for f in fields:
+        target_name = f["name"]
+        source_label = f.get("label") or target_name.upper()
+        data_type = f.get("dataType", "Text")
+        is_pk = bool(f.get("isPrimaryKey", False))
+
+        dlf_reps.append({
+            "dataType": data_type,
+            "isPrimaryKey": is_pk,
+            "label": source_label,
+            "name": target_name,
+        })
+        sf_entry: Dict[str, Any] = {"dataType": data_type, "name": source_label}
+        if "format" in f and f["format"]:
+            sf_entry["format"] = f["format"]
+        source_fields.append(sf_entry)
+        mappings.append({
+            "sourceFieldLabel": source_label,
+            "targetFieldName": target_name,
+        })
+
+    dlo_info: Dict[str, Any] = {
+        "dataspaceInfo": [{"name": data_space}],
+        "category": category,
+        "label": label,
+        "name": dlo_name,
+        "dataLakeFieldInputRepresentations": dlf_reps,
+    }
+    if event_time_field:
+        dlo_info["eventDateTimeFieldName"] = event_time_field
+
+    payload: Dict[str, Any] = {
+        "name": name,
+        "label": label,
+        "datastreamType": "EXTERNAL",
+        "connectorInfo": {
+            "connectorType": "DataConnector",
+            "connectorDetails": {"name": connector_name},
+        },
+        "dataLakeObjectInfo": dlo_info,
+        "mappings": mappings,
+        "refreshConfig": {"refreshMode": refresh_mode},
+        "sourceFields": source_fields,
+        "advancedAttributes": {
+            "schema": schema,
+            "database": database,
+            "object": object_name,
+        },
+        "dataAccessMode": "Direct_Access",
+    }
+
+    url = f"{base_url}/services/data/v63.0/ssot/data-streams"
+    logger.info(
+        f"Creating zero-copy data stream '{name}' "
+        f"(connector={connector_name}, source={database}.{schema}.{object_name})"
+    )
+    response = requests.post(url, json=payload, headers=headers, timeout=120)
+    _handle_error_response(response)
+    return response.json()
+
+
 FILE_BASED_CONNECTOR_TYPES = {"AwsS3", "GCS", "AzureBlob", "SFTP"}
 
 

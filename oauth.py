@@ -1,22 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import json
 import logging
 import os
-import sys
-import base64
-import hashlib
-import secrets
-import time
-from threading import Thread
-import http.server
-import webbrowser
-from urllib.parse import parse_qs, urlparse
-from typing import Tuple
-
-import requests
-from rfc3986 import builder as uri_builder
+import shutil
+import subprocess
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -44,255 +33,106 @@ def _load_dotenv_if_available() -> None:
 _load_dotenv_if_available()
 
 
-def _mask_secret(value: str, visible: int = 4) -> str:
-    """Show only the last `visible` chars of a secret for safe logging."""
-    if not value or len(value) <= visible:
-        return "****"
-    return "*" * (len(value) - visible) + value[-visible:]
-
-
 class OAuthConfig:
-    def __init__(self, client_id: str, client_secret: str, login_root: str, redirect_uri: str):
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.login_root = login_root
-        self.redirect_uri = redirect_uri
+    """Identifies which sf CLI org to use. Kept as a class for API compatibility."""
+
+    def __init__(self, target_org: str | None):
+        self.target_org = target_org
 
     @classmethod
     def from_env(cls) -> "OAuthConfig":
-        client_id = os.getenv("SF_CLIENT_ID")
-        client_secret = os.getenv("SF_CLIENT_SECRET")
-        login_root = os.getenv("SF_LOGIN_URL", "login.salesforce.com")
-        redirect_uri = os.getenv(
-            "SF_CALLBACK_URL", "http://localhost:55556/Callback")
-
-        missing = [name for name, val in {
-            "SF_CLIENT_ID": client_id,
-            "SF_CLIENT_SECRET": client_secret,
-        }.items() if not val]
-        if missing:
-            logger.error(
-                "Missing required environment variables: %s. "
-                "Set them via env vars or a .env file next to server.py.",
-                ", ".join(missing),
-            )
-            sys.exit(1)
-
-        logger.info(
-            "OAuth config loaded (client_id=...%s, login=%s)",
-            _mask_secret(client_id), login_root,
-        )
-        return cls(client_id=client_id, client_secret=client_secret, login_root=login_root, redirect_uri=redirect_uri)
-
-
-class _RequestHandler(http.server.BaseHTTPRequestHandler):  # pragma: no cover
-    def do_GET(self):  # noqa: N802
-        parts = urlparse(self.path)
-        if parts.path.lower() != "/callback":
-            self.send_error(404, "Not Found", "Not Found")
-            return
-
-        args = parse_qs(parts.query)
-        self.server.oauth_result = args
-
-        has_code = "code" in args
-        response_content = f"Final Status: {has_code=}".encode("utf-8")
-        response_content += b"\nYou can close this window now"
-        self.send_response(200, "OK")
-        self.send_header("Content-Type", "text")
-        self.send_header("Content-Length", str(len(response_content)))
-        self.end_headers()
-        self.wfile.write(response_content)
-
-
-def _generate_pkce_pair() -> Tuple[str, str]:
-    """Generate PKCE code verifier and challenge for OAuth flow"""
-    code_verifier = (
-        base64.urlsafe_b64encode(secrets.token_bytes(
-            32)).decode("utf-8").rstrip("=")
-    )
-
-    challenge = hashlib.sha256(code_verifier.encode("utf-8")).digest()
-    code_challenge = (
-        base64.urlsafe_b64encode(challenge).decode("utf-8").rstrip("=")
-    )
-
-    return code_verifier, code_challenge
-
-
-_TOKEN_CACHE_PATH = os.path.expanduser("~/.dc_mcp_token_cache.json")
-
-
-def _load_token_cache() -> dict:
-    try:
-        with open(_TOKEN_CACHE_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_token_cache(token: str, instance_url: str, exp: datetime, refresh_token: str = None):
-    try:
-        data = {"token": token, "instance_url": instance_url, "exp": exp.isoformat()}
-        if refresh_token:
-            data["refresh_token"] = refresh_token
+        target_org = os.getenv("SF_TARGET_ORG")
+        if target_org:
+            logger.info("Using sf CLI org from SF_TARGET_ORG=%s", target_org)
         else:
-            existing = _load_token_cache()
-            if existing.get("refresh_token"):
-                data["refresh_token"] = existing["refresh_token"]
-        with open(os.open(_TOKEN_CACHE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-            json.dump(data, f)
-    except Exception:
-        pass
+            logger.info("SF_TARGET_ORG not set; will use sf CLI default target-org")
+        return cls(target_org=target_org)
 
 
 class OAuthSession:
+    """
+    Auth session backed by the Salesforce CLI (`sf` / `sfdx`).
+
+    Calls `sf org display --target-org <alias> --json` to retrieve the access token
+    and instance URL. The CLI handles refresh transparently — when a token has
+    expired, `sf org display` re-issues a new one against the cached refresh token.
+    """
+
+    # Re-query the CLI at most once every TTL seconds; the CLI itself caches and
+    # refreshes the underlying token.
+    _CLI_CACHE_TTL = timedelta(minutes=10)
+
     def __init__(self, config: OAuthConfig):
         self.config = config
+        self._cli_path = shutil.which("sf") or shutil.which("sfdx")
+        if not self._cli_path:
+            raise RuntimeError(
+                "Salesforce CLI not found. Install it (https://developer.salesforce.com/tools/salesforce-cli) "
+                "and run `sf org login web --alias <alias>`."
+            )
         self.token: str | None = None
-        self.exp: datetime | None = None
         self.instance_url: str | None = None
-        self.refresh_token: str | None = None
-        # Load from disk cache on init
-        cache = _load_token_cache()
-        if cache.get("refresh_token"):
-            self.refresh_token = cache["refresh_token"]
-        if cache.get("token") and cache.get("exp"):
-            cached_exp = datetime.fromisoformat(cache["exp"])
-            if datetime.now() < cached_exp:
-                self.token = cache["token"]
-                self.exp = cached_exp
-                self.instance_url = cache.get("instance_url")
+        self._fetched_at: datetime | None = None
 
-    def _run_oauth_flow(self, scopes: list[str]):
-        logger.info(f"Starting OAuth flow with scopes: {scopes}")
-        login_url = f"https://{self.config.login_root}/services/oauth2/authorize"
-        token_exchange_url = f"https://{self.config.login_root}/services/oauth2/token"
-        redirect_uri = self.config.redirect_uri
-
-        code_verifier, code_challenge = _generate_pkce_pair()
-
-        browser_uri: str = (
-            uri_builder.URIBuilder(path=login_url)
-            .add_query_from(
-                {
-                    "client_id": self.config.client_id,
-                    "redirect_uri": redirect_uri,
-                    "response_type": "code",
-                    "scope": " ".join(scopes),
-                    "prompt": "login",
-                    "code_challenge": code_challenge,
-                    "code_challenge_method": "S256",
-                }
-            )
-            .finalize()
-            .unsplit()
-        )
-
-        parsed_redirect = urlparse(redirect_uri)
-        port = parsed_redirect.port
-
-        logger.debug("Starting OAuth callback server on localhost:%s", port)
-        server = http.server.HTTPServer(("localhost", port), _RequestHandler)
-        server.allow_reuse_address = True
-        t = Thread(target=server.handle_request, daemon=True)
-        t.start()
-
-        logger.info("Opening browser for OAuth authorization on %s", self.config.login_root)
-        webbrowser.open_new_tab(browser_uri)
-        while t.is_alive():
-            t.join(10)
-
-        oauth_result_args = server.oauth_result
-
-        if "code" not in oauth_result_args:
-            error_msg = "OAuth authentication failed - no authorization code received"
-            if "error" in oauth_result_args:
-                error_msg += f". Error: {oauth_result_args['error'][0]}"
-                if "error_description" in oauth_result_args:
-                    error_msg += f" - {oauth_result_args['error_description'][0]}"
-            raise Exception(error_msg)
-
-        code = oauth_result_args["code"][0]
-        logger.info(f"Authorization code received, exchanging for access token")
-
-        response = requests.post(
-            token_exchange_url,
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "client_id": self.config.client_id,
-                "client_secret": self.config.client_secret,
-                "redirect_uri": redirect_uri,
-                "code_verifier": code_verifier,
-            },
-            headers={"Accept": "application/json"},
-        )
-
-        logger.info("Token exchange response: status=%s, elapsed=%.2fs", response.status_code, response.elapsed.total_seconds())
-
-        if response.status_code >= 400:
-            logger.error("Token exchange failed (HTTP %s). Check Connected App configuration.", response.status_code)
-
-        response.raise_for_status()
-
-        logger.info("Successfully obtained access token")
-        return response.json()
-
-    def _refresh_access_token(self) -> bool:
-        """Use refresh token to get a new access token without browser interaction."""
-        if not self.refresh_token:
-            return False
-        token_url = f"https://{self.config.login_root}/services/oauth2/token"
+    def _run_cli(self) -> dict:
+        cmd = [self._cli_path, "org", "display", "--json"]
+        if self.config.target_org:
+            cmd += ["--target-org", self.config.target_org]
+        logger.debug("Running CLI: %s", " ".join(cmd))
         try:
-            response = requests.post(
-                token_url,
-                {
-                    "grant_type": "refresh_token",
-                    "refresh_token": self.refresh_token,
-                    "client_id": self.config.client_id,
-                    "client_secret": self.config.client_secret,
-                },
-                headers={"Accept": "application/json"},
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
-            if response.status_code >= 400:
-                logger.warning("Refresh token failed (HTTP %s), will re-auth via browser", response.status_code)
-                return False
-            data = response.json()
-            self.token = data["access_token"]
-            self.exp = datetime.now() + timedelta(minutes=110)
-            self.instance_url = data.get("instance_url", self.instance_url)
-            if data.get("refresh_token"):
-                self.refresh_token = data["refresh_token"]
-            _save_token_cache(self.token, self.instance_url, self.exp, self.refresh_token)
-            logger.info("Silently refreshed access token (no browser needed)")
-            return True
-        except Exception as e:
-            logger.warning("Refresh token exchange failed: %s", type(e).__name__)
-            return False
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            raise RuntimeError(
+                f"`sf org display` failed (exit {e.returncode}). "
+                f"Make sure you have authenticated the org "
+                f"(`sf org login web --alias {self.config.target_org or '<alias>'}`).\n{stderr}"
+            ) from e
+        except FileNotFoundError as e:
+            raise RuntimeError("Salesforce CLI binary disappeared after init.") from e
+
+        payload = json.loads(result.stdout)
+        if payload.get("status") != 0 or "result" not in payload:
+            raise RuntimeError(f"sf CLI returned unexpected payload: {payload}")
+        return payload["result"]
+
+    def _refresh_from_cli(self) -> None:
+        info = self._run_cli()
+        token = info.get("accessToken")
+        instance_url = info.get("instanceUrl")
+        if not token or not instance_url:
+            raise RuntimeError(
+                "sf CLI did not return accessToken/instanceUrl. "
+                "The org may not be authenticated; run `sf org login web`."
+            )
+        self.token = token
+        self.instance_url = instance_url
+        self._fetched_at = datetime.now()
+        logger.info(
+            "Loaded sf CLI session: org=%s, instance=%s",
+            info.get("alias") or info.get("username"),
+            instance_url,
+        )
 
     def ensure_access(self) -> str:
-        if self.exp is not None and datetime.now() > self.exp:
-            self.exp = None
-            self.token = None
-
-        if self.token is None:
-            if self._refresh_access_token():
-                return self.token
-            auth_info = self._run_oauth_flow(
-                ["api", "cdp_query_api", "cdp_profile_api", "refresh_token", "offline_access"])
-            self.token = auth_info["access_token"]
-            self.exp = datetime.now() + timedelta(minutes=110)
-            self.instance_url = auth_info["instance_url"]
-            if auth_info.get("refresh_token"):
-                self.refresh_token = auth_info["refresh_token"]
-            _save_token_cache(self.token, self.instance_url, self.exp, self.refresh_token)
-
-        return self.token
+        cache_stale = (
+            self._fetched_at is None
+            or datetime.now() - self._fetched_at > self._CLI_CACHE_TTL
+        )
+        if self.token is None or cache_stale:
+            self._refresh_from_cli()
+        return self.token  # type: ignore[return-value]
 
     def get_token(self) -> str:
         return self.ensure_access()
 
     def get_instance_url(self) -> str:
         self.ensure_access()
+        assert self.instance_url is not None
         return self.instance_url
