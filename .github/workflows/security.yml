@@ -38,7 +38,7 @@ jobs:
           chmod +x "$HOME/bin/sf"
           PATH="$HOME/bin:$PATH" python -c "import server; server.verify_tool_definitions()"
 
-      - name: Secret scan of the current tree
+      - name: Secret scan of git history
         run: |
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz" | tar -xz -C /tmp
           /tmp/gitleaks detect --source . --redact --exit-code 1 --log-opts="--all"
