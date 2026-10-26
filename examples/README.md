@@ -2,7 +2,7 @@
 
 Standalone Python scripts that exercise the same OAuth + Data Cloud helpers used by the MCP server. Useful when you want to script a quick check against your org without going through Cursor / Claude Desktop.
 
-All scripts read the same environment variables as the MCP server (`SF_CLIENT_ID`, `SF_CLIENT_SECRET`, optionally `SF_LOGIN_URL`, `SF_CALLBACK_URL`). The first run will pop a browser for the OAuth login; subsequent runs reuse the cached token at `~/.dc_mcp_token_cache.json`.
+All scripts use the same Salesforce CLI session as the MCP server. Log in with `sf org login web --alias data360` and, if needed, set `SF_TARGET_ORG=data360`.
 
 | Script | What it does |
 |---|---|
@@ -16,8 +16,8 @@ From the repo root:
 
 ```bash
 pip install -r requirements.txt
-export SF_CLIENT_ID=...
-export SF_CLIENT_SECRET=...
+sf org login web --alias data360
+export SF_TARGET_ORG=data360
 python examples/count_active_streams.py
 ```
 

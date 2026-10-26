@@ -1,0 +1,44 @@
+name: Security checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install ruff bandit pip-audit
+
+      - name: Ruff
+        run: ruff check server.py oauth.py connect_api_dc_sql.py connect_api_datacloud.py
+
+      - name: Bandit
+        run: bandit -q -c pyproject.toml -ll -ii server.py oauth.py connect_api_dc_sql.py connect_api_datacloud.py
+
+      - name: Dependency audit
+        run: pip-audit -r requirements.lock
+
+      - name: Tool definition pin
+        run: |
+          mkdir -p "$HOME/bin"
+          printf '#!/bin/sh\nexit 0\n' > "$HOME/bin/sf"
+          chmod +x "$HOME/bin/sf"
+          PATH="$HOME/bin:$PATH" python -c "import server; server.verify_tool_definitions()"
+
+      - name: Secret scan of the current tree
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz" | tar -xz -C /tmp
+          /tmp/gitleaks detect --source . --redact --exit-code 1 --log-opts="--all"

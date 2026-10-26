@@ -74,8 +74,8 @@ class OAuthSession:
         self.instance_url: str | None = None
         self._fetched_at: datetime | None = None
 
-    def _run_cli(self) -> dict:
-        cmd = [self._cli_path, "org", "display", "--json"]
+    def _run_cli(self, *extra_args: str) -> dict:
+        cmd = [self._cli_path, *extra_args, "--json"]
         if self.config.target_org:
             cmd += ["--target-org", self.config.target_org]
         logger.debug("Running CLI: %s", " ".join(cmd))
@@ -89,8 +89,9 @@ class OAuthSession:
             )
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or "").strip()
+            joined = " ".join(extra_args)
             raise RuntimeError(
-                f"`sf org display` failed (exit {e.returncode}). "
+                f"`sf {joined}` failed (exit {e.returncode}). "
                 f"Make sure you have authenticated the org "
                 f"(`sf org login web --alias {self.config.target_org or '<alias>'}`).\n{stderr}"
             ) from e
@@ -102,10 +103,24 @@ class OAuthSession:
             raise RuntimeError(f"sf CLI returned unexpected payload: {payload}")
         return payload["result"]
 
+    @staticmethod
+    def _extract_access_token(result) -> str | None:
+        """`org auth show-access-token --json` returns either a bare token
+        string or a dict like {"accessToken": "..."} depending on CLI version."""
+        if isinstance(result, str):
+            return result.strip() or None
+        if isinstance(result, dict):
+            token = result.get("accessToken") or result.get("access_token")
+            return token.strip() if isinstance(token, str) and token.strip() else None
+        return None
+
     def _refresh_from_cli(self) -> None:
-        info = self._run_cli()
-        token = info.get("accessToken")
+        # `org display` no longer returns the raw access token (newer CLI
+        # versions redact it), so fetch the instance URL here and the token
+        # via the dedicated `org auth show-access-token` command.
+        info = self._run_cli("org", "display")
         instance_url = info.get("instanceUrl")
+        token = self._extract_access_token(self._run_cli("org", "auth", "show-access-token"))
         if not token or not instance_url:
             raise RuntimeError(
                 "sf CLI did not return accessToken/instanceUrl. "

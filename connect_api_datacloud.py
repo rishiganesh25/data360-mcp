@@ -5,7 +5,9 @@ Uses the Salesforce Connect REST API for Data Cloud operations.
 
 import json
 import logging
+import re
 from typing import Dict, List, Optional, Any
+from urllib.parse import quote
 
 import requests
 
@@ -13,6 +15,29 @@ from oauth import OAuthSession
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
+
+_PATH_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_CREATABLE_SOBJECTS = frozenset({
+    "ActivationTarget",
+    "DataAction",
+    "DataActionTarget",
+    "DataStream",
+    "MarketSegment",
+    "MarketSegmentActivation",
+    "MarketSegmentDefinition",
+    "MktCalculatedInsight",
+    "MktDataTransform",
+})
+
+
+def _path_id(value: str, label: str = "identifier") -> str:
+    """Reject path traversal and quote a single URL path segment."""
+    if not isinstance(value, str) or not _PATH_ID.fullmatch(value):
+        raise ValueError(
+            f"Invalid {label}: {value!r}. "
+            "Use only letters, numbers, underscores, and hyphens."
+        )
+    return quote(value, safe="")
 
 
 def _sanitize_error_body(text: str, max_len: int = 1000) -> str:
@@ -97,7 +122,7 @@ def get_data_stream_details(oauth_session: OAuthSession, data_stream_name: str) 
         "Content-Type": "application/json"
     }
     
-    url = f"{base_url}/services/data/v63.0/ssot/data-streams/{data_stream_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-streams/{_path_id(data_stream_name)}"
     
     logger.info(f"Fetching data stream details for {data_stream_name}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -149,7 +174,7 @@ def get_data_model_object_details(oauth_session: OAuthSession, dmo_name: str) ->
         "Content-Type": "application/json"
     }
     
-    url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{dmo_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{_path_id(dmo_name)}"
     
     logger.info(f"Fetching DMO details for {dmo_name}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -423,7 +448,7 @@ def describe_sobject(oauth_session: OAuthSession, sobject_name: str) -> Dict[str
         "Content-Type": "application/json"
     }
 
-    url = f"{base_url}/services/data/v63.0/sobjects/{sobject_name}/describe"
+    url = f"{base_url}/services/data/v63.0/sobjects/{_path_id(sobject_name)}/describe"
 
     logger.info(f"Describing sObject '{sobject_name}'")
     response = requests.get(url, headers=headers, timeout=60)
@@ -436,7 +461,15 @@ def describe_sobject(oauth_session: OAuthSession, sobject_name: str) -> Dict[str
 def create_sobject_record(oauth_session: OAuthSession, sobject_name: str, record: Dict[str, Any]) -> Dict[str, Any]:
     """
     Create a record via the Salesforce sObject REST API.
+
+    Limited to Data Cloud configuration objects. Core CRM objects such as
+    Account and User are rejected.
     """
+    if sobject_name not in _CREATABLE_SOBJECTS:
+        allowed = ", ".join(sorted(_CREATABLE_SOBJECTS))
+        raise ValueError(
+            f"Refused to create {sobject_name!r}. Allowed objects: {allowed}."
+        )
     base_url = oauth_session.get_instance_url()
     token = oauth_session.get_token()
 
@@ -445,7 +478,7 @@ def create_sobject_record(oauth_session: OAuthSession, sobject_name: str, record
         "Content-Type": "application/json"
     }
 
-    url = f"{base_url}/services/data/v63.0/sobjects/{sobject_name}"
+    url = f"{base_url}/services/data/v63.0/sobjects/{_path_id(sobject_name)}"
 
     logger.info(f"Creating {sobject_name} record")
     response = requests.post(url, json=record, headers=headers, timeout=120)
@@ -579,7 +612,7 @@ def delete_data_graph(oauth_session: OAuthSession, developer_name: str) -> Dict[
     base_url = oauth_session.get_instance_url()
     token = oauth_session.get_token()
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"{base_url}/services/data/v63.0/ssot/data-graphs/{developer_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-graphs/{_path_id(developer_name)}"
     logger.info(f"Deleting data graph {developer_name} at {url}")
     response = requests.delete(url, headers=headers, timeout=60)
     _handle_error_response(response)
@@ -637,7 +670,7 @@ def get_connector_source_objects(
         "Content-Type": "application/json"
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-connectors/{connector_name}/source-objects"
+    url = f"{base_url}/services/data/v63.0/ssot/data-connectors/{_path_id(connector_name)}/source-objects"
 
     logger.info(f"Fetching source objects for connector '{connector_name}'")
     response = requests.get(url, headers=headers, timeout=60)
@@ -699,7 +732,7 @@ def list_connector_instances(
         if include_config:
             detail_url = (
                 f"{base_url}/services/data/v63.0/tooling/sobjects/"
-                f"MktDataConnection/{rec['Id']}"
+                f"MktDataConnection/{_path_id(rec['Id'], 'record id')}"
             )
             detail_resp = requests.get(detail_url, headers=headers, timeout=60)
             if detail_resp.status_code == 200:
@@ -750,7 +783,7 @@ def list_connection_source_objects(
     }
     url = (
         f"{base_url}/services/data/v63.0/ssot/connections/"
-        f"{connection_id}/objects"
+        f"{_path_id(connection_id)}/objects"
     )
     logger.info(f"Browsing source objects for connection '{connection_id}'")
     response = requests.post(url, json={}, headers=headers, timeout=60)
@@ -774,7 +807,7 @@ def list_connection_databases(
     }
     url = (
         f"{base_url}/services/data/v63.0/ssot/connections/"
-        f"{connection_id}/databases"
+        f"{_path_id(connection_id)}/databases"
     )
     response = requests.post(url, json={}, headers=headers, timeout=60)
     _handle_error_response(response)
@@ -805,7 +838,7 @@ def describe_connection_source_object(
     }
     url = (
         f"{base_url}/services/data/v63.0/ssot/connections/"
-        f"{connection_id}/objects/{object_name}/fields"
+        f"{_path_id(connection_id)}/objects/{_path_id(object_name)}/fields"
     )
     body = {"advancedAttributes": {"database": database, "schema": schema}}
     response = requests.post(url, json=body, headers=headers, timeout=60)
@@ -1304,7 +1337,7 @@ def delete_data_stream(
 
     should_delete = str(delete_data_lake_object).lower()
     url = (
-        f"{base_url}/services/data/v63.0/ssot/data-streams/{data_stream_name}"
+        f"{base_url}/services/data/v63.0/ssot/data-streams/{_path_id(data_stream_name)}"
         f"?shouldDeleteDataLakeObject={should_delete}"
     )
 
@@ -1401,7 +1434,7 @@ def refresh_data_stream(oauth_session: OAuthSession, data_stream_name: str) -> D
     
     # If ingestion API fails, try the direct refresh endpoint
     if response.status_code >= 400:
-        url = f"{base_url}/services/data/v63.0/ssot/data-streams/{data_stream_name}/actions/refresh"
+        url = f"{base_url}/services/data/v63.0/ssot/data-streams/{_path_id(data_stream_name)}/actions/refresh"
         response = requests.post(url, headers=headers, timeout=60)
     
     if response.status_code >= 400:
@@ -1465,8 +1498,8 @@ def _ensure_mkt_data_model_field(
     # Check if MktDataModelField already exists
     query = (
         f"SELECT Id, DeveloperName FROM MktDataModelField "
-        f"WHERE MktDataModelObjectId = '{dmo_id}' "
-        f"AND DeveloperName = '{dev_name}'"
+        f"WHERE MktDataModelObjectId = '{_path_id(dmo_id, 'DMO id')}' "
+        f"AND DeveloperName = '{_path_id(dev_name, 'field developer name')}'"
     )
     q_url = f"{base_url}/services/data/v63.0/tooling/query/"
     q_resp = requests.get(q_url, headers=headers, params={"q": query}, timeout=60)
@@ -1553,7 +1586,7 @@ def create_custom_dmo_field(
     }
 
     # Step 1: Look up the DMO's MktDataModelObject Id (needed for both paths)
-    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{dmo_name}"
+    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{_path_id(dmo_name)}"
     dmo_resp = requests.get(dmo_details_url, headers=headers, timeout=60)
     if dmo_resp.status_code != 200:
         return {
@@ -1594,7 +1627,7 @@ def create_custom_dmo_field(
         dev_name = field_name.replace("__c", "")
         lookup_query = (
             f"SELECT Id, DeveloperName FROM CustomField "
-            f"WHERE DeveloperName = '{dev_name}'"
+            f"WHERE DeveloperName = '{_path_id(dev_name, 'field developer name')}'"
         )
         q_url = f"{base_url}/services/data/v63.0/tooling/query/"
         q_resp = requests.get(q_url, headers=headers, params={"q": lookup_query}, timeout=60)
@@ -1648,7 +1681,7 @@ def delete_custom_dmo_fields(
         "Content-Type": "application/json",
     }
 
-    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{dmo_name}"
+    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{_path_id(dmo_name)}"
     dmo_resp = requests.get(dmo_details_url, headers=headers, timeout=60)
     if dmo_resp.status_code != 200:
         return {
@@ -1657,11 +1690,11 @@ def delete_custom_dmo_fields(
         }
     dmo_id = dmo_resp.json().get("id")
 
-    dev_names = [n.replace("__c", "") for n in field_names]
+    dev_names = [_path_id(n.replace("__c", ""), "field name") for n in field_names]
     quoted = "','".join(dev_names)
     query = (
         f"SELECT Id, DeveloperName, FieldDefinitionId FROM MktDataModelField "
-        f"WHERE MktDataModelObjectId = '{dmo_id}' "
+        f"WHERE MktDataModelObjectId = '{_path_id(dmo_id, 'DMO id')}' "
         f"AND DeveloperName IN ('{quoted}')"
     )
     q_url = f"{base_url}/services/data/v63.0/tooling/query/"
@@ -1679,7 +1712,7 @@ def delete_custom_dmo_fields(
         entry: Dict[str, Any] = {"field": dev}
 
         # Delete MktDataModelField
-        mdf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/MktDataModelField/{mdf_id}"
+        mdf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/MktDataModelField/{_path_id(mdf_id)}"
         logger.info(f"Deleting MktDataModelField '{dev}' ({mdf_id})")
         mdf_resp = requests.delete(mdf_url, headers=headers, timeout=60)
         if mdf_resp.status_code == 204:
@@ -1689,7 +1722,7 @@ def delete_custom_dmo_fields(
 
         # Delete CustomField definition
         if cf_id:
-            cf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/CustomField/{cf_id}"
+            cf_url = f"{base_url}/services/data/v63.0/tooling/sobjects/CustomField/{_path_id(cf_id)}"
             logger.info(f"Deleting CustomField '{dev}' ({cf_id})")
             cf_resp = requests.delete(cf_url, headers=headers, timeout=60)
             if cf_resp.status_code == 204:
@@ -1769,7 +1802,7 @@ def delete_dlo_dmo_mapping(
             if not name:
                 deleted.append({"error": "Could not determine mapping name", "mapping": m})
                 continue
-            url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{name}"
+            url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{_path_id(name)}"
             logger.info(f"Deleting DLO->DMO mapping '{name}'")
             resp = requests.delete(url, headers=headers, timeout=60)
             if resp.status_code == 204:
@@ -1778,7 +1811,7 @@ def delete_dlo_dmo_mapping(
                 deleted.append({"error": f"HTTP {resp.status_code}", "detail": resp.text, "mapping_name": name})
         return {"source_entity": source_entity, "target_entity": target_entity, "results": deleted}
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{mapping_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{_path_id(mapping_name)}"
     logger.info(f"Deleting DLO->DMO mapping '{mapping_name}'")
     resp = requests.delete(url, headers=headers, timeout=60)
 
@@ -1888,7 +1921,7 @@ def update_dlo_dmo_mapping(
     }
 
     # 1. Fetch the current mapping
-    get_url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{mapping_name}"
+    get_url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{_path_id(mapping_name)}"
     logger.info(f"Fetching existing mapping '{mapping_name}' for update")
     get_resp = requests.get(get_url, headers=headers, timeout=60)
 
@@ -1918,7 +1951,7 @@ def update_dlo_dmo_mapping(
 
     # 2. Delete the existing mapping
     logger.info(f"Deleting existing mapping '{mapping_name}' for update")
-    del_url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{mapping_name}"
+    del_url = f"{base_url}/services/data/v63.0/ssot/data-model-object-mappings/{_path_id(mapping_name)}"
     del_resp = requests.delete(del_url, headers=headers, timeout=60)
 
     if del_resp.status_code != 204:
@@ -1991,13 +2024,12 @@ def create_dlo_dmo_mapping(
     }
 
     # Pre-flight: fetch DMO fields and auto-create any missing custom fields
-    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{target_entity}"
+    dmo_details_url = f"{base_url}/services/data/v63.0/ssot/data-model-objects/{_path_id(target_entity)}"
     dmo_resp = requests.get(dmo_details_url, headers=headers, timeout=60)
 
     auto_created_fields = []
     if dmo_resp.status_code == 200:
         dmo_data = dmo_resp.json()
-        dmo_id = dmo_data.get("id")
         existing_fields = {f["name"] for f in dmo_data.get("fields", [])}
 
         target_fields = {
@@ -2115,7 +2147,7 @@ def get_activation_by_id(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/activations/{activation_id}"
+    url = f"{base_url}/services/data/v63.0/ssot/activations/{_path_id(activation_id)}"
 
     logger.info(f"Fetching activation {activation_id} from {url}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -2140,7 +2172,7 @@ def delete_activation(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/activations/{activation_id}"
+    url = f"{base_url}/services/data/v63.0/ssot/activations/{_path_id(activation_id)}"
 
     logger.info(f"Deleting activation {activation_id} at {url}")
     response = requests.delete(url, headers=headers, timeout=60)
@@ -2171,7 +2203,7 @@ def update_activation(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/activations/{activation_id}"
+    url = f"{base_url}/services/data/v63.0/ssot/activations/{_path_id(activation_id)}"
 
     logger.info(f"Updating activation {activation_id} at {url}")
     response = requests.patch(url, json=payload, headers=headers, timeout=120)
@@ -2221,7 +2253,7 @@ def get_ssot_connector_metadata(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/connectors/{connector_type}"
+    url = f"{base_url}/services/data/v63.0/ssot/connectors/{_path_id(connector_type)}"
 
     logger.info(f"Fetching connector metadata for {connector_type} from {url}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -2268,7 +2300,7 @@ def get_data_action_target_by_name(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets/{api_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets/{_path_id(api_name)}"
 
     logger.info(f"Fetching data action target {api_name} from {url}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -2320,7 +2352,7 @@ def delete_data_action_target(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets/{api_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-action-targets/{_path_id(api_name)}"
 
     logger.info(f"Deleting data action target {api_name} at {url}")
     response = requests.delete(url, headers=headers, timeout=60)
@@ -2447,7 +2479,7 @@ def update_data_lake_object(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-lake-objects/{dlo_identifier}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-lake-objects/{_path_id(dlo_identifier)}"
 
     logger.info(f"Updating DLO {dlo_identifier} at {url}")
     response = requests.patch(url, json=payload, headers=headers, timeout=120)
@@ -2474,7 +2506,7 @@ def delete_data_lake_object(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-lake-objects/{dlo_identifier}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-lake-objects/{_path_id(dlo_identifier)}"
 
     logger.info(f"Deleting DLO {dlo_identifier} at {url}")
     response = requests.delete(url, headers=headers, timeout=60)
@@ -2523,7 +2555,7 @@ def get_data_space_by_id(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{_path_id(id_or_name)}"
 
     logger.info(f"Fetching data space {id_or_name} from {url}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -2549,7 +2581,7 @@ def update_data_space(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{_path_id(id_or_name)}"
 
     logger.info(f"Updating data space {id_or_name} at {url}")
     response = requests.patch(url, json=payload, headers=headers, timeout=120)
@@ -2576,7 +2608,7 @@ def get_data_space_members(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}/members"
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{_path_id(id_or_name)}/members"
 
     logger.info(f"Fetching members for data space {id_or_name} from {url}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -2602,7 +2634,7 @@ def get_data_space_member(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{id_or_name}/members/{member_object_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-spaces/{_path_id(id_or_name)}/members/{_path_id(member_object_name)}"
 
     logger.info(f"Fetching member {member_object_name} from data space {id_or_name}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -2655,7 +2687,7 @@ def update_data_transform(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{name_or_id}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{_path_id(name_or_id)}"
 
     logger.info(f"Updating data transform {name_or_id} at {url}")
     response = requests.put(url, json=payload, headers=headers, timeout=120)
@@ -2682,7 +2714,7 @@ def delete_data_transform(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{name_or_id}"
+    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{_path_id(name_or_id)}"
 
     logger.info(f"Deleting data transform {name_or_id} at {url}")
     response = requests.delete(url, headers=headers, timeout=60)
@@ -2709,7 +2741,7 @@ def get_data_transform_run_history(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{name_or_id}/run-history"
+    url = f"{base_url}/services/data/v63.0/ssot/data-transforms/{_path_id(name_or_id)}/run-history"
 
     logger.info(f"Fetching run history for data transform {name_or_id}")
     response = requests.get(url, headers=headers, timeout=60)
@@ -2735,7 +2767,7 @@ def update_segment(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/segments/{segment_api_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/segments/{_path_id(segment_api_name)}"
 
     logger.info(f"Updating segment {segment_api_name} at {url}")
     response = requests.patch(url, json=payload, headers=headers, timeout=120)
@@ -2762,7 +2794,7 @@ def delete_segment(
         "Content-Type": "application/json",
     }
 
-    url = f"{base_url}/services/data/v63.0/ssot/segments/{segment_api_name}"
+    url = f"{base_url}/services/data/v63.0/ssot/segments/{_path_id(segment_api_name)}"
 
     logger.info(f"Deleting segment {segment_api_name} at {url}")
     response = requests.delete(url, headers=headers, timeout=60)

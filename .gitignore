@@ -152,3 +152,6 @@ pyrightconfig.json
 # MCP configuration (may contain credential references)
 .mcp.json
 .mcp.json.*.bkp.json
+
+# Local MCP usage logs may contain tool arguments
+usage_logs/

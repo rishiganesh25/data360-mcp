@@ -1,11 +1,15 @@
 import json
 import logging
-import time
-from typing import Dict, List, Optional, Union
+import os
+from typing import Dict, List, Union
 
 import requests
 
+from connect_api_datacloud import _path_id
 from oauth import OAuthSession, OAuthConfig
+
+MAX_QUERY_ROWS = max(1, int(os.getenv("MAX_QUERY_ROWS", "1000")))
+MAX_QUERY_BYTES = max(1, int(os.getenv("MAX_QUERY_BYTES", "1000000")))
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
@@ -99,16 +103,17 @@ def run_query(
                         "Query ID not returned by the API.")
 
     # Collect initial rows and metadata if present
-    rows: list = submit_payload.get("data", []) or []
+    rows: list = (submit_payload.get("data", []) or [])[:MAX_QUERY_ROWS]
     metadata = submit_payload.get("metadata", [])
     completion = status_obj.get("completionStatus")
     total_row_count = int(status_obj.get("rowCount"))
+    safe_query_id = _path_id(str(query_id), "query id")
 
     # Step 2: poll for completion when needed (long-polling via waitTimeMs)
     poll_count = 0
     while completion not in ["Finished", "ResultsProduced"]:
         poll_count += 1
-        poll_url = f"{url_base}/{query_id}"
+        poll_url = f"{url_base}/{safe_query_id}"
         logger.debug(
             f"Polling query status (attempt {poll_count}): {poll_url}")
 
@@ -127,16 +132,16 @@ def run_query(
         completion = poll_payload.get("completionStatus")
         total_row_count = int(poll_payload.get("rowCount"))
 
-    # Step 3: retrieve remaining rows via pagination
-    while len(rows) < total_row_count:
+    # Step 3: retrieve remaining rows via pagination, without exceeding the cap
+    while len(rows) < total_row_count and len(rows) < MAX_QUERY_ROWS:
         rows_params = dict(common_params)
         rows_params.update({
-            "rowLimit": pagination_batch_size,
+            "rowLimit": min(pagination_batch_size, MAX_QUERY_ROWS - len(rows)),
             "offset": len(rows),
             "omitSchema": "true",
         })
 
-        rows_url = f"{url_base}/{query_id}/rows"
+        rows_url = f"{url_base}/{safe_query_id}/rows"
         logger.debug(
             f"Fetching rows: offset={rows_params.get('offset')}, limit={rows_params.get('rowLimit')}")
 
@@ -159,11 +164,38 @@ def run_query(
         logger.debug(
             f"Retrieved {returned_rows} rows, total so far: {len(rows)}")
 
+    truncated = len(rows) < total_row_count
+    if len(rows) > MAX_QUERY_ROWS:
+        rows = rows[:MAX_QUERY_ROWS]
+        truncated = True
+
+    encoded = json.dumps(rows, default=str).encode()
+    if len(encoded) > MAX_QUERY_BYTES:
+        kept: list = []
+        size = 2  # []
+        for row in rows:
+            row_size = len(json.dumps(row, default=str).encode()) + 1
+            if kept and size + row_size > MAX_QUERY_BYTES:
+                break
+            kept.append(row)
+            size += row_size
+        rows = kept
+        truncated = True
+
     logger.info(f"Query completed: retrieved {len(rows)} total rows")
-    return {
+    result: Dict[str, Union[List, str, int, bool]] = {
         "data": rows,
-        "metadata": metadata
+        "metadata": metadata,
+        "rowCount": total_row_count,
     }
+    if truncated:
+        result["truncated"] = True
+        result["returnedRows"] = len(rows)
+        result["message"] = (
+            f"Results capped at {MAX_QUERY_ROWS} rows and {MAX_QUERY_BYTES} bytes. "
+            f"{len(rows)} of {total_row_count} rows returned."
+        )
+    return result
 
 
 if __name__ == "__main__":

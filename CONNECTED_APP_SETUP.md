@@ -1,6 +1,8 @@
 # Salesforce Connected App Setup Guide
 
-This guide walks you through creating a Salesforce Connected App that the Data Cloud MCP server uses to authenticate via OAuth 2.0 with PKCE.
+The current server does not use a Connected App consumer key or secret. Authenticate with `sf org login web` and set `SF_TARGET_ORG`, as described in the README. This page is kept only as a historical reference.
+
+This guide walks through creating a Salesforce Connected App for the older OAuth 2.0 with PKCE flow.
 
 **Time required**: ~10 minutes
 

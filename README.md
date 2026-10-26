@@ -93,144 +93,47 @@ This installs the MCP SDK, requests, pydantic, and other required packages.
 
 ---
 
-### Step 4: Verify the Server Can Start
+### Step 4: Install the Salesforce CLI and log in
+
+The server does not use a Connected App consumer secret. It reads the access token from an authenticated Salesforce CLI org, and it will not start unless the `sf` command is installed.
+
+```bash
+npm install -g @salesforce/cli
+sf org login web --alias data360
+```
+
+Use `--instance-url https://test.salesforce.com` for a sandbox, or your My Domain URL for a production org. The user must have Data Cloud permissions.
+
+---
+
+### Step 5: Verify the Server Can Start
 
 ```bash
 python server.py
 ```
 
-You should see `Starting MCP server` in the output. Press `Ctrl+C` to stop it. This confirms your Python environment is set up correctly.
+You should see `Starting MCP server` in the output. Press `Ctrl+C` to stop it.
 
 ---
 
-### Step 5: Enable External Client Apps in Salesforce
-
-1. Log in to your Salesforce org
-2. Click the **gear icon** (top right) > **Setup**
-3. In the **Quick Find** box (left sidebar), type: `External Client Apps`
-4. Click **Settings** under "External Client Apps"
-5. Enable **both** toggles:
-   - "Allow access to External Client App consumer secrets via REST API"
-   - "Allow creation of connected apps"
-6. Click **Save**
-
----
-
-### Step 6: Create a Connected App
-
-1. In Setup, navigate to **External Client Apps** (left sidebar)
-2. Click **New Connected App**
-3. Fill in the basic information:
-
-| Field | Value |
-|---|---|
-| Connected App Name | `Data Cloud MCP` |
-| API Name | `Data_Cloud_MCP` (auto-populated) |
-| Contact Email | Your email address |
-
-4. Click **Next** or scroll down to the API section
-
----
-
-### Step 7: Configure OAuth on the Connected App
-
-1. Check the box: **"Enable OAuth Settings"**
-
-2. Set the **Callback URL** to exactly:
-   ```
-   http://localhost:55556/Callback
-   ```
-   > **Warning**: Do NOT use port `55555` — it conflicts with macOS AirPlay Receiver and other services.
-
-3. Add the following **OAuth Scopes** (click "Add" for each one):
-
-   | Scope to select | What it enables |
-   |---|---|
-   | `Access the identity URL service (id, profile, email, address, phone)` | User identity during OAuth |
-   | `Manage user data via APIs (api)` | General Salesforce REST API access |
-   | `Manage Data Cloud profile data (cdp_profile_api)` | Data Cloud Connect API (streams, segments, graphs) |
-   | `Perform ANSI SQL queries on Data Cloud data (cdp_query_api)` | SQL queries against Data Cloud tables |
-   | `Perform requests at any time (refresh_token, offline_access)` | Keeps sessions alive without re-login |
-
-4. Under **Security Settings**, enable all three:
-
-   | Setting | Value |
-   |---|---|
-   | Require Secret for Web Server Flow | **Yes** (checked) |
-   | Require Secret for Refresh Token Flow | **Yes** (checked) |
-   | Require Proof Key for Code Exchange (PKCE) | **Yes** (checked) |
-
-5. Click **Save**
-
----
-
-### Step 8: Configure OAuth Policies
-
-1. On your Connected App page, click **Manage** (button at the top)
-2. Click **Edit Policies**
-3. Under **OAuth Policies**, find **IP Relaxation** and change it to:
-   ```
-   Relax IP restrictions
-   ```
-4. Click **Save**
-
-> **Why?** Without this, Salesforce blocks OAuth from `localhost` because it doesn't match any trusted IP range. The PKCE flow still requires browser login, so this is safe.
-
----
-
-### Step 9: Copy Your Consumer Key and Secret
-
-1. Go to **Setup** > search **"External Client Apps"** in Quick Find
-2. Find **Data Cloud MCP** in the list and click on it
-3. Navigate to: **Settings** > **OAuth Settings** > **App Settings**
-4. Copy the **Consumer Key** — this becomes your `SF_CLIENT_ID`
-5. Click "Click to reveal" next to Consumer Secret and copy it — this becomes your `SF_CLIENT_SECRET`
-
-> **Important**: Keep these safe. You'll paste them in the next step. Never commit them to git.
-
-> **Note**: Connected App changes can take 5-10 minutes to propagate. If you get errors in Step 12, wait and retry.
-
----
-
-### Step 10: Configure Your Credentials
-
-Back in your terminal, in the `data360-mcp` directory:
+### Step 6: Point the server at that org
 
 ```bash
 cp .env.example .env
-```
-
-Open `.env` in any text editor and paste your credentials:
-
-```bash
-# Required — paste the Consumer Key and Secret from Step 9
-SF_CLIENT_ID=your_consumer_key_here
-SF_CLIENT_SECRET=your_consumer_secret_here
-
-# Optional — change only if needed
-SF_LOGIN_URL=login.salesforce.com
-SF_CALLBACK_URL=http://localhost:55556/Callback
-```
-
-**If you're using a sandbox**, change:
-```bash
-SF_LOGIN_URL=test.salesforce.com
-```
-
-**If you're using a My Domain org**, change:
-```bash
-SF_LOGIN_URL=your-company.my.salesforce.com
-```
-
-Then secure the file:
-
-```bash
 chmod 600 .env
 ```
 
+Set the alias you used above:
+
+```bash
+SF_TARGET_ORG=data360
+```
+
+Leave it unset to use the CLI's default target org. Do not put a consumer key or consumer secret in this file.
+
 ---
 
-### Step 11: Wire It Into Your MCP Client
+### Step 7: Wire It Into Your MCP Client
 
 Pick the MCP client you're using and follow the config below.
 
@@ -315,17 +218,12 @@ Edit your config file:
 
 ---
 
-### Step 12: Authenticate (First Run)
+### Step 8: Use it
 
-1. **Restart your MCP client** (or reload/refresh the MCP server list)
+1. **Restart your MCP client** (or reload the MCP server list)
 2. **Ask it something** — for example: *"List all tables in Data Cloud"*
-3. **A browser window will open** showing the Salesforce login page
-4. **Sign in** with the Salesforce user that has Data Cloud permissions
-5. **Authorize the app** when Salesforce asks "Allow access?"
-6. The browser will show: **"You can close this window now"**
-7. **Switch back to your MCP client** — the response should now appear
 
-The access token is cached at `~/.dc_mcp_token_cache.json` and lasts ~110 minutes. When it expires, the browser login will open again automatically — no action needed from you.
+If the CLI session expires, run `sf org login web --alias data360` again. The server does not open its own browser login and does not store a token cache of its own. Delete tools stay refused until the call includes `confirm=true` after you approve the delete.
 
 ---
 
@@ -351,7 +249,7 @@ If any of these fail, check the [Troubleshooting](#troubleshooting) section.
 
 | Tool | What it does |
 |---|---|
-| `query` | Execute SQL (PostgreSQL dialect) against Data Cloud. Handles long-running queries and pagination automatically. |
+| `query` | Execute SQL (PostgreSQL dialect) against Data Cloud. Results are capped at 1,000 rows and 1 MB unless `MAX_QUERY_ROWS` / `MAX_QUERY_BYTES` are set. |
 | `list_tables` | List all queryable tables. Filterable via `DEFAULT_LIST_TABLE_FILTER` env var. |
 | `describe_table` | Get column names for a specific table. |
 
@@ -491,9 +389,9 @@ If any of these fail, check the [Troubleshooting](#troubleshooting) section.
 
 | Tool | What it does |
 |---|---|
-| `sf_rest_api` | Make GET/POST/PATCH/DELETE calls to `/services/data/` and `/services/connect/` paths. |
-| `describe_sobject` | Get field metadata for any Salesforce sObject. |
-| `create_sobject_record` | Create a record on any sObject. |
+| `sf_rest_api` | Read-only GET for `/services/data/.../ssot/...` or an sObject describe. Writes, Tooling API, and SOQL are refused. |
+| `describe_sobject` | Get field metadata for a Salesforce sObject. The name must be a single identifier. |
+| `create_sobject_record` | Create a record on an allowlisted Data Cloud object such as `MarketSegmentDefinition`. Core objects such as Account are refused. |
 
 ---
 
@@ -501,11 +399,10 @@ If any of these fail, check the [Troubleshooting](#troubleshooting) section.
 
 | Environment Variable | Required | Default | Description |
 |---|---|---|---|
-| `SF_CLIENT_ID` | Yes | — | Consumer Key from your Connected App |
-| `SF_CLIENT_SECRET` | Yes | — | Consumer Secret from your Connected App |
-| `SF_LOGIN_URL` | No | `login.salesforce.com` | Login host. Use `test.salesforce.com` for sandboxes or your My Domain. |
-| `SF_CALLBACK_URL` | No | `http://localhost:55556/Callback` | Must match the Connected App's Callback URL exactly. |
-| `DEFAULT_LIST_TABLE_FILTER` | No | `%` | SQL LIKE filter for `list_tables` (e.g., `ssot__%` for only standard DMOs). |
+| `SF_TARGET_ORG` | No | CLI default org | Alias or username from `sf org login web`. |
+| `DEFAULT_LIST_TABLE_FILTER` | No | `%` | SQL LIKE filter for `list_tables`. Letters, numbers, underscores, and `%` only. |
+| `MAX_QUERY_ROWS` | No | `1000` | Maximum rows returned by `query`. |
+| `MAX_QUERY_BYTES` | No | `1000000` | Maximum JSON size returned by `query`. |
 
 ---
 
@@ -514,11 +411,10 @@ If any of these fail, check the [Troubleshooting](#troubleshooting) section.
 ```mermaid
 flowchart LR
     Client["MCP Client<br/>(Claude Code / Cursor / Claude Desktop)"] -->|stdio| Server["server.py<br/>FastMCP"]
-    Server --> OAuth["oauth.py<br/>OAuth 2.0 + PKCE"]
-    Server --> SQL["connect_api_dc_sql.py<br/>SQL query + pagination"]
+    Server --> OAuth["oauth.py<br/>sf org display"]
+    Server --> SQL["connect_api_dc_sql.py<br/>SQL query + row cap"]
     Server --> DC["connect_api_datacloud.py<br/>Connect REST API"]
-    OAuth -->|browser login| SF["Salesforce Login"]
-    OAuth -->|token cache| Disk["~/.dc_mcp_token_cache.json"]
+    OAuth -->|access token| SF["Salesforce CLI session"]
     SQL -->|POST /ssot/query-sql| DCAPI["Data Cloud Query API"]
     DC -->|/ssot/*| ConnectAPI["Data Cloud Connect API"]
     DC -->|/sobjects/*| RestAPI["Salesforce REST API"]
@@ -528,12 +424,16 @@ flowchart LR
 
 ## Security
 
-- **OAuth 2.0 with PKCE** — no long-lived credentials stored; tokens auto-expire in ~110 minutes
-- **Token cache** is written with `0600` permissions (owner-read/write only)
-- **Credentials in `.env`** — never committed to git (`.gitignore`'d)
-- **`sf_rest_api`** is restricted to `/services/data/` and `/services/connect/` paths only; tooling, composite, and async-query endpoints are blocked
-- **SQL input validation** — table names are validated against identifier patterns before use
-- **Local transport only** — the server communicates via stdio (no network port exposed)
+- **Salesforce CLI session** — the server uses `sf org display` for the org named by `SF_TARGET_ORG`. It does not store a Connected App consumer secret.
+- **Destructive tools require `confirm=true`** — delete tools refuse to run until that flag is set after an explicit approval. Read-only tools are marked with `readOnlyHint`; deletes and updates are marked `destructiveHint`.
+- **`sf_rest_api` is GET-only** — allowed paths are Data Cloud `/ssot/` resources and sObject describe. Tooling API, SOQL, composite, and write methods are refused.
+- **`create_sobject_record` is allowlisted** — only named Data Cloud configuration objects can be created.
+- **Path identifiers are validated** — names placed in REST paths must match letters, numbers, underscores, and hyphens, then they are URL-encoded.
+- **Query results are capped** — `query` stops at `MAX_QUERY_ROWS` and `MAX_QUERY_BYTES`.
+- **Usage logs stay local and private** — they are written to `~/.data360-mcp/usage_logs` with `0700`/`0600` permissions. Arguments and errors are stored as SHA-256 hashes.
+- **Rate limits** — destructive tools allow 10 calls per minute, writes 20, and reads 120. Override with `MCP_DESTRUCTIVE_RATE_LIMIT`, `MCP_WRITE_RATE_LIMIT`, and `MCP_READ_RATE_LIMIT`.
+- **Tool definitions are pinned** — startup compares the tool list with `tool_definitions.sha256` and stops on a mismatch.
+- **Local transport only** — the server communicates via stdio and does not listen on a network port.
 
 ---
 
@@ -541,17 +441,16 @@ flowchart LR
 
 | Problem | Cause & Fix |
 |---|---|
-| `Address already in use` on port 55556 | Another process is using that port. Run `lsof -i :55556` to find it and kill it, or change `SF_CALLBACK_URL` (and the Connected App) to a different port. |
-| `invalid_client_id` after browser login | Your `SF_CLIENT_ID` doesn't match a Connected App in the org you're logging into. Double-check the Consumer Key and that `SF_LOGIN_URL` points to the correct org. Wait 10 minutes if you just created the app. |
-| `redirect_uri_mismatch` | The Callback URL in the Connected App must be **exactly** `http://localhost:55556/Callback` (case-sensitive, no trailing slash). |
+| `Salesforce CLI not found` | Install the CLI with `npm install -g @salesforce/cli`, then run `sf org login web --alias data360`. |
+| `sf org display` failed | The alias in `SF_TARGET_ORG` is not authenticated. Run `sf org login web --alias data360` again. |
 | `403 Forbidden` from Data Cloud APIs | The logged-in user doesn't have Data Cloud permissions. Assign the **Customer Data Platform Admin** permission set in Setup > Permission Sets. |
-| `cdp_query_api not enabled` | The Connected App is missing required scopes. Edit it in Setup, add all 5 scopes from Step 7, save, and wait ~10 minutes for propagation. |
-| Tools not showing in Cursor | Click the refresh/reload icon in Cursor MCP settings. Verify that `python` resolves to a Python with `mcp[cli]` installed (run `python -m mcp --version`). |
-| `401 Unauthorized` mid-session | Token expired and auto-refresh failed. Delete `~/.dc_mcp_token_cache.json` and trigger any tool call to re-authenticate. |
+| `Invalid identifier` | A name passed to a tool contained `/`, `.`, or another character that is not allowed in a URL path segment. Use the API name only. |
+| Refused to delete | Delete tools require `confirm=true` after you explicitly approve the action. |
+| `query` result says truncated | The result hit `MAX_QUERY_ROWS` or `MAX_QUERY_BYTES`. Narrow the SQL or raise those limits. |
+| Tools not showing in Cursor | Click the refresh icon in Cursor MCP settings. Verify `.venv/bin/python -m mcp --version` works. |
+| `401 Unauthorized` mid-session | The CLI access token expired. Run `sf org login web --alias data360` again. |
 | `ModuleNotFoundError: No module named 'mcp'` | Dependencies not installed. Run `pip install -r requirements.txt` in your activated venv. |
-| Browser doesn't open for login | You're running in a headless/remote environment. Run the server on a machine with a browser, or pre-authenticate on a desktop machine first. |
 | `Connection refused` in MCP client | The server isn't running or crashed on startup. Check the path in your MCP config and try `python server.py` manually to see error output. |
-| `PKCE challenge failed` | Make sure "Require Proof Key for Code Exchange" is checked in the Connected App. If you changed it after creation, wait 10 minutes. |
 
 ---
 
@@ -567,7 +466,7 @@ python examples/count_streams.py
 python examples/dump_metadata.py
 ```
 
-Useful for verifying your Connected App works before wiring up an MCP client.
+Useful for verifying the Salesforce CLI login works before wiring up an MCP client.
 
 ---
 
