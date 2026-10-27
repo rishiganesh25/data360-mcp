@@ -4,8 +4,8 @@
 # =============================================================================
 # Review this script, then run it from a checkout:
 #   chmod +x install.sh && ./install.sh
-# Do not pipe it from the internet. A remote install must name an exact commit:
-#   DATA360_MCP_REF=<commit-or-tag> ./install.sh
+# Do not pipe it from the internet. A remote install must name a full commit SHA:
+#   DATA360_MCP_REF=<40-character-commit-sha> ./install.sh
 # =============================================================================
 
 set -euo pipefail
@@ -72,6 +72,11 @@ if [ -f "$SOURCE_DIR/server.py" ]; then
     copy_source
     cd "$INSTALL_DIR"
 elif [ -n "${DATA360_MCP_REF:-}" ]; then
+    if ! [[ "$DATA360_MCP_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        echo "ERROR: DATA360_MCP_REF must be a full 40-character commit SHA, not a branch or tag."
+        exit 1
+    fi
+    DATA360_MCP_REF=$(printf '%s' "$DATA360_MCP_REF" | tr '[:upper:]' '[:lower:]')
     if [ -d "$INSTALL_DIR/.git" ]; then
         echo "       Checking out $DATA360_MCP_REF"
         git -C "$INSTALL_DIR" fetch --quiet origin "$DATA360_MCP_REF"
@@ -80,10 +85,15 @@ elif [ -n "${DATA360_MCP_REF:-}" ]; then
         git clone --quiet "$REPO_URL" "$INSTALL_DIR"
         git -C "$INSTALL_DIR" checkout --detach "$DATA360_MCP_REF"
     fi
+    CHECKED_OUT=$(git -C "$INSTALL_DIR" rev-parse HEAD)
+    if [ "$CHECKED_OUT" != "$DATA360_MCP_REF" ]; then
+        echo "ERROR: Checkout is $CHECKED_OUT, expected $DATA360_MCP_REF."
+        exit 1
+    fi
     cd "$INSTALL_DIR"
 else
     echo "ERROR: Refusing to clone an unpinned main branch."
-    echo "       Run ./install.sh from a reviewed checkout, or set DATA360_MCP_REF to a commit or tag."
+    echo "       Run ./install.sh from a reviewed checkout, or set DATA360_MCP_REF to a full commit SHA."
     exit 1
 fi
 
@@ -96,8 +106,7 @@ if [ ! -d ".venv" ]; then
 fi
 
 source .venv/bin/activate
-pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
+python3 -m pip install --quiet --require-hashes -r requirements.lock
 
 echo "       Dependencies installed ✓"
 
@@ -123,6 +132,9 @@ MCP_RATE_WINDOW_SECONDS=60
 MCP_DESTRUCTIVE_RATE_LIMIT=10
 MCP_WRITE_RATE_LIMIT=20
 MCP_READ_RATE_LIMIT=120
+MCP_ENABLE_WRITE_TOOLS=true
+MCP_ENABLE_DESTRUCTIVE_TOOLS=true
+MCP_ALLOWED_WEBHOOK_HOSTS=
 MCP_ENFORCE_TOOL_PINS=true
 ENVEOF
 

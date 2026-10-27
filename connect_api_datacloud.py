@@ -3,7 +3,6 @@ Data Cloud Connect API utilities for managing data streams, mappings, and more.
 Uses the Salesforce Connect REST API for Data Cloud operations.
 """
 
-import json
 import logging
 import re
 from typing import Dict, List, Optional, Any
@@ -364,7 +363,10 @@ def create_segment(oauth_session: OAuthSession, segment_definition: Dict[str, An
 
     url = f"{base_url}/services/data/v63.0/ssot/segments"
 
-    logger.info(f"Creating segment via Connect API: {json.dumps(segment_definition)}")
+    logger.info(
+        "Creating segment via Connect API: %s",
+        segment_definition.get("developerName", "unnamed"),
+    )
     response = requests.post(url, json=segment_definition, headers=headers, timeout=120)
 
     if response.status_code >= 300:
@@ -600,8 +602,7 @@ def create_data_graph(
     }
 
     url = f"{base_url}/services/data/v63.0/ssot/data-graphs"
-    logger.info(f"Creating data graph {developer_name} at {url}")
-    logger.debug(f"Payload: {json.dumps(payload)}")
+    logger.info("Creating data graph %s", developer_name)
     response = requests.post(url, json=payload, headers=headers, timeout=120)
     _handle_error_response(response)
     return response.json()

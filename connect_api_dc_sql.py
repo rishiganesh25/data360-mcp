@@ -164,25 +164,41 @@ def run_query(
         logger.debug(
             f"Retrieved {returned_rows} rows, total so far: {len(rows)}")
 
+    logger.info("Query completed: retrieved %s total rows", len(rows))
+    return _bounded_query_result(rows, metadata, total_row_count)
+
+
+def _bounded_query_result(rows: list, metadata, total_row_count: int) -> dict:
+    """Keep the serialized response, including metadata, within the configured caps."""
     truncated = len(rows) < total_row_count
+    selected = list(rows[:MAX_QUERY_ROWS])
     if len(rows) > MAX_QUERY_ROWS:
-        rows = rows[:MAX_QUERY_ROWS]
         truncated = True
+    response_metadata = metadata
 
-    encoded = json.dumps(rows, default=str).encode()
-    if len(encoded) > MAX_QUERY_BYTES:
-        kept: list = []
-        size = 2  # []
-        for row in rows:
-            row_size = len(json.dumps(row, default=str).encode()) + 1
-            if kept and size + row_size > MAX_QUERY_BYTES:
-                break
-            kept.append(row)
-            size += row_size
-        rows = kept
-        truncated = True
+    while True:
+        result = _query_payload(selected, response_metadata, total_row_count, truncated)
+        if len(json.dumps(result, default=str).encode()) <= MAX_QUERY_BYTES:
+            return result
+        if selected:
+            selected.pop()
+            truncated = True
+            continue
+        if response_metadata:
+            response_metadata = []
+            truncated = True
+            continue
+        return {
+            "data": [],
+            "metadata": [],
+            "rowCount": total_row_count,
+            "truncated": True,
+            "returnedRows": 0,
+            "error": "Result omitted because it exceeded MAX_QUERY_BYTES.",
+        }
 
-    logger.info(f"Query completed: retrieved {len(rows)} total rows")
+
+def _query_payload(rows: list, metadata, total_row_count: int, truncated: bool) -> dict:
     result: Dict[str, Union[List, str, int, bool]] = {
         "data": rows,
         "metadata": metadata,

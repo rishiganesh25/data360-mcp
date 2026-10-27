@@ -10,6 +10,7 @@ import threading
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from mcp.server.fastmcp import FastMCP
@@ -103,7 +104,7 @@ _DESTRUCTIVE = ToolAnnotations(
 
 
 def _confirm_or_refuse(confirm: bool, action: str) -> dict | None:
-    """Block a destructive tool call until the caller sets confirm=true."""
+    """Block a mutating tool call until the caller sets confirm=true."""
     if confirm is True:
         return None
     return {
@@ -112,6 +113,46 @@ def _confirm_or_refuse(confirm: bool, action: str) -> dict | None:
             "Ask the user to approve, then call again with confirm=true."
         )
     }
+
+
+def _allowed_webhook_hosts() -> set[str]:
+    raw = os.getenv("MCP_ALLOWED_WEBHOOK_HOSTS", "")
+    return {item.strip().lower().rstrip(".") for item in raw.split(",") if item.strip()}
+
+
+def _validate_external_endpoint(url: object) -> str | None:
+    """Allow only HTTPS endpoints whose hostname was explicitly approved."""
+    hosts = _allowed_webhook_hosts()
+    if not hosts:
+        return (
+            "Refused external endpoint. Set MCP_ALLOWED_WEBHOOK_HOSTS to the "
+            "approved hostnames before creating this target."
+        )
+    if not isinstance(url, str) or not url.strip():
+        return "This target requires an https targetEndpoint on an allowlisted host."
+    parsed = urlsplit(url.strip())
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username
+        or parsed.password
+        or parsed.port
+        or host not in hosts
+    ):
+        return (
+            "External endpoints must use https, the default port, and a hostname "
+            "listed in MCP_ALLOWED_WEBHOOK_HOSTS. Embedded credentials are refused."
+        )
+    return None
+
+
+def _external_target_error(target_type: str, config: dict) -> str | None:
+    endpoint = config.get("targetEndpoint") if isinstance(config, dict) else None
+    sends_externally = target_type.strip().lower() in {"webhook", "marketingcloud"} or bool(endpoint)
+    if not sends_externally:
+        return None
+    return _validate_external_endpoint(endpoint)
 
 # Global config and session
 sf_org: OAuthConfig = OAuthConfig.from_env()
@@ -166,19 +207,35 @@ def _argument_digest(args: tuple, kwargs: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _rate_limit_for(tool_name: str) -> int:
+def _rate_category(tool_name: str) -> str:
     if tool_name.startswith(("delete_", "update_")):
-        return _DESTRUCTIVE_RATE_LIMIT
+        return "destructive"
     if tool_name.startswith("create_") or tool_name in {"refresh_stream", "batch_create_dlo_dmo_mappings"}:
+        return "write"
+    return "read"
+
+
+def _rate_limit_for(category: str) -> int:
+    if category == "destructive":
+        return _DESTRUCTIVE_RATE_LIMIT
+    if category == "write":
         return _WRITE_RATE_LIMIT
     return _READ_RATE_LIMIT
 
 
-def _allow_call(tool_name: str) -> bool:
-    limit = _rate_limit_for(tool_name)
+def _category_enabled(category: str) -> bool:
+    if category == "destructive":
+        return os.getenv("MCP_ENABLE_DESTRUCTIVE_TOOLS", "true").lower() != "false"
+    if category == "write":
+        return os.getenv("MCP_ENABLE_WRITE_TOOLS", "true").lower() != "false"
+    return True
+
+
+def _allow_call(category: str) -> bool:
+    limit = _rate_limit_for(category)
     now = time.monotonic()
     with _rate_lock:
-        hits = _rate_hits[tool_name]
+        hits = _rate_hits[category]
         while hits and now - hits[0] > _RATE_WINDOW_SECONDS:
             hits.popleft()
         if len(hits) >= limit:
@@ -214,12 +271,23 @@ def log_usage(func):
         error_sha256 = ""
         result = None
         try:
-            if not _allow_call(tool_name):
+            category = _rate_category(tool_name)
+            if not _category_enabled(category):
+                status = "disabled"
+                result = {
+                    "error": (
+                        f"{category.capitalize()} tools are disabled. "
+                        f"Set MCP_ENABLE_{category.upper()}_TOOLS=true only for an org "
+                        "whose permissions are limited to that category."
+                    )
+                }
+                return result
+            if not _allow_call(category):
                 status = "rate_limited"
                 result = {
                     "error": (
-                        f"Rate limit exceeded for {tool_name}. "
-                        f"Limit is {_rate_limit_for(tool_name)} calls per {_RATE_WINDOW_SECONDS} seconds."
+                        f"Rate limit exceeded for {category} tools. "
+                        f"Limit is {_rate_limit_for(category)} calls per {_RATE_WINDOW_SECONDS} seconds."
                     )
                 }
                 return result
@@ -486,10 +554,17 @@ def update_segment(
             '"includeDbt": {"models": {"models": [{"name": "m1", "sql": "SELECT ..."}]}}, '
             '"publishSchedule": "One"}'
         )),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves this update.",
+    ),
 ) -> dict:
     """
     Update a segment in Data Cloud.
     """
+    refused = _confirm_or_refuse(confirm, "update this segment")
+    if refused:
+        return refused
     try:
         parsed = json.loads(payload)
         return _update_segment(oauth_session, segment_api_name, parsed)
@@ -605,10 +680,17 @@ def update_activation(
             '"shouldExcludeUpdates": true, '
             '"staticDataConfig": {"staticData": [{"name": "key", "value": "val"}]}}'
         )),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves this update.",
+    ),
 ) -> dict:
     """
     Update a segment activation in Data Cloud.
     """
+    refused = _confirm_or_refuse(confirm, "update this activation")
+    if refused:
+        return refused
     try:
         parsed = json.loads(payload)
         return _update_activation(oauth_session, activation_id, parsed)
@@ -688,8 +770,9 @@ def get_data_action_target(
     "1. Core — connects to another Salesforce org. Config needs: orgLabel, orgId.\n"
     "2. MarketingCloud — connects to Marketing Cloud. Config needs: "
     "dataActionDestinationType, contentKey, contentTemplate, targetEndpoint.\n"
-    "3. WebHook — sends data to a webhook URL. Config needs: targetEndpoint.\n"
-    "All types require: type, label, apiName, and a config object."
+    "3. WebHook — sends data to an allowlisted https webhook. Config needs: targetEndpoint.\n"
+    "All types require: type, label, apiName, a config object, and confirm=true. "
+    "WebHook and MarketingCloud endpoints must use a hostname in MCP_ALLOWED_WEBHOOK_HOSTS."
 ))
 @log_usage
 def create_data_action_target(
@@ -702,15 +785,25 @@ def create_data_action_target(
             'Core: {"orgLabel": "MyCompany Org", "orgId": "00DX2000001ZUi5"}\n'
             'MarketingCloud: {"dataActionDestinationType": "API_EVENT", '
             '"contentKey": "APIEvent-...", "contentTemplate": "API Event Name", '
-            '"targetEndpoint": "https://..."}\n'
-            'WebHook: {"targetEndpoint": "https://webhook.site/..."}'
+            '"targetEndpoint": "https://hooks.example.com/events"}\n'
+            'WebHook: {"targetEndpoint": "https://hooks.example.com/data-cloud"}'
         )),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves sending records to this target.",
+    ),
 ) -> dict:
     """
     Create a data action target (Core, MarketingCloud, or WebHook).
     """
+    refused = _confirm_or_refuse(confirm, "create this data action target")
+    if refused:
+        return refused
     try:
         parsed_config = json.loads(config)
+        endpoint_error = _external_target_error(target_type, parsed_config)
+        if endpoint_error:
+            return {"error": endpoint_error}
         payload = {
             "type": target_type,
             "label": label,
@@ -769,7 +862,7 @@ def list_data_actions() -> list[dict]:
     "dataActionTargetNames (array of target API names), dataActionSources (array with "
     "sourceName, sourceType, and sourceCdcSubscriptions like CREATE/UPDATE/DELETE).\n"
     "Optional fields: description, actionConditionExpression, actionConditions, "
-    "dataActionEnrichmentProperties, dataActionProjectedFields."
+    "dataActionEnrichmentProperties, dataActionProjectedFields. Requires confirm=true."
 ))
 @log_usage
 def create_data_action(
@@ -791,10 +884,17 @@ def create_data_action(
     conditions: str = Field(default="[]", description="Optional JSON array of action conditions"),
     enrichment_properties: str = Field(default="[]", description="Optional JSON array of enrichment properties"),
     projected_fields: str = Field(default="[]", description="Optional JSON array of projected fields"),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves sending records to the named targets.",
+    ),
 ) -> dict:
     """
     Create a data action that triggers on DMO record changes and sends data to targets.
     """
+    refused = _confirm_or_refuse(confirm, "create this data action")
+    if refused:
+        return refused
     try:
         parsed_targets = json.loads(target_names)
         parsed_sources = json.loads(sources)
@@ -1096,10 +1196,17 @@ def update_dlo(
             "name, label, dataType ('Text', 'Number', or 'DateTime'), isPrimaryKey ('true'/'false'). "
             'Example: [{"name": "FieldFour", "label": "FieldFour", "dataType": "Text", "isPrimaryKey": "false"}]'
         )),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves this update.",
+    ),
 ) -> dict:
     """
     Update a Data Lake Object (DLO) — change its label or add new fields.
     """
+    refused = _confirm_or_refuse(confirm, "update this data lake object")
+    if refused:
+        return refused
     try:
         payload = {}
         if label:
@@ -1173,10 +1280,17 @@ def update_data_space(
     id_or_name: str = Field(description="The data space ID or name (e.g. 'default')"),
     label: str = Field(default="", description="New display label"),
     description: str = Field(default="", description="New description"),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves this update.",
+    ),
 ) -> dict:
     """
     Update a data space's label and/or description.
     """
+    refused = _confirm_or_refuse(confirm, "update this data space")
+    if refused:
+        return refused
     try:
         payload = {}
         if label:
@@ -1282,10 +1396,17 @@ def update_data_transform(
             "name, label, type ('BATCH'/'STREAMING'), definition (with type, version, nodes/expression). "
             "Optional: creationType, currencyIsoCode, dataSpaceName, description, primarySource."
         )),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves this replacement.",
+    ),
 ) -> dict:
     """
     Update a data transform (full replacement).
     """
+    refused = _confirm_or_refuse(confirm, "replace this data transform")
+    if refused:
+        return refused
     try:
         parsed = json.loads(payload)
         return _update_data_transform(oauth_session, name_or_id, parsed)
@@ -2013,7 +2134,14 @@ def update_dlo_dmo_mapping(
             'Example: [{"sourceFieldDeveloperName": "email__c", '
             '"targetFieldDeveloperName": "ssot__Id__c"}]'
         )),
+    confirm: bool = Field(
+        default=False,
+        description="Must be true. Set this only after the user explicitly approves deleting and recreating this mapping.",
+    ),
 ) -> dict:
+    refused = _confirm_or_refuse(confirm, "replace this DLO-to-DMO mapping")
+    if refused:
+        return refused
     try:
         parsed = json.loads(field_mapping)
         if not isinstance(parsed, list) or not parsed:

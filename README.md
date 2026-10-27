@@ -41,7 +41,7 @@ Before starting, make sure you have:
 | pip (Python package manager) | `pip3 --version` | Comes with Python; or `python3 -m ensurepip` |
 | git | `git --version` | [git-scm.com](https://git-scm.com/) |
 | A Salesforce org with **Data Cloud enabled** | Setup > Data Cloud | Contact your Salesforce admin |
-| A Salesforce user with Data Cloud permissions | — | Assign `Customer Data Platform Admin` permission set |
+| A Salesforce user with Data Cloud permissions | — | Use the narrowest permission set that covers the enabled tools. Keep writes and deletes disabled unless that admin access is required. |
 
 ---
 
@@ -402,7 +402,10 @@ If any of these fail, check the [Troubleshooting](#troubleshooting) section.
 | `SF_TARGET_ORG` | No | CLI default org | Alias or username from `sf org login web`. |
 | `DEFAULT_LIST_TABLE_FILTER` | No | `%` | SQL LIKE filter for `list_tables`. Letters, numbers, underscores, and `%` only. |
 | `MAX_QUERY_ROWS` | No | `1000` | Maximum rows returned by `query`. |
-| `MAX_QUERY_BYTES` | No | `1000000` | Maximum JSON size returned by `query`. |
+| `MAX_QUERY_BYTES` | No | `1000000` | Maximum serialized response size returned by `query`, including metadata. |
+| `MCP_ENABLE_WRITE_TOOLS` | No | `true` | Set to `false` to refuse every create tool. |
+| `MCP_ENABLE_DESTRUCTIVE_TOOLS` | No | `true` | Set to `false` to refuse every update and delete tool. |
+| `MCP_ALLOWED_WEBHOOK_HOSTS` | For external targets | empty | Comma-separated HTTPS hostnames allowed for webhook and Marketing Cloud endpoints. |
 
 ---
 
@@ -425,13 +428,15 @@ flowchart LR
 ## Security
 
 - **Salesforce CLI session** — the server uses `sf org display` for the org named by `SF_TARGET_ORG`. It does not store a Connected App consumer secret.
-- **Destructive tools require `confirm=true`** — delete tools refuse to run until that flag is set after an explicit approval. Read-only tools are marked with `readOnlyHint`; deletes and updates are marked `destructiveHint`.
+- **Mutations require `confirm=true`** — delete, update, data-action, and data-action-target tools refuse to run until that flag is set after an explicit approval. Read-only tools are marked with `readOnlyHint`; deletes and updates are marked `destructiveHint`.
+- **External destinations are allowlisted** — webhook and Marketing Cloud endpoints must be `https` hostnames listed in `MCP_ALLOWED_WEBHOOK_HOSTS`.
+- **Tool categories can be disabled** — set `MCP_ENABLE_WRITE_TOOLS=false` or `MCP_ENABLE_DESTRUCTIVE_TOOLS=false` when the connected user should not have that access.
 - **`sf_rest_api` is GET-only** — allowed paths are Data Cloud `/ssot/` resources and sObject describe. Tooling API, SOQL, composite, and write methods are refused.
 - **`create_sobject_record` is allowlisted** — only named Data Cloud configuration objects can be created.
 - **Path identifiers are validated** — names placed in REST paths must match letters, numbers, underscores, and hyphens, then they are URL-encoded.
-- **Query results are capped** — `query` stops at `MAX_QUERY_ROWS` and `MAX_QUERY_BYTES`.
+- **Query results are capped** — `query` stops at `MAX_QUERY_ROWS`. The complete response, including metadata, must fit in `MAX_QUERY_BYTES`; an oversized row is omitted rather than returned.
 - **Usage logs stay local and private** — they are written to `~/.data360-mcp/usage_logs` with `0700`/`0600` permissions. Arguments and errors are stored as SHA-256 hashes.
-- **Rate limits** — destructive tools allow 10 calls per minute, writes 20, and reads 120. Override with `MCP_DESTRUCTIVE_RATE_LIMIT`, `MCP_WRITE_RATE_LIMIT`, and `MCP_READ_RATE_LIMIT`.
+- **Rate limits are shared by category** — all destructive tools share 10 calls per minute, all writes share 20, and all reads share 120. Override with `MCP_DESTRUCTIVE_RATE_LIMIT`, `MCP_WRITE_RATE_LIMIT`, and `MCP_READ_RATE_LIMIT`.
 - **Tool definitions are pinned** — startup compares the tool list with `tool_definitions.sha256` and stops on a mismatch.
 - **Local transport only** — the server communicates via stdio and does not listen on a network port.
 
@@ -443,9 +448,9 @@ flowchart LR
 |---|---|
 | `Salesforce CLI not found` | Install the CLI with `npm install -g @salesforce/cli`, then run `sf org login web --alias data360`. |
 | `sf org display` failed | The alias in `SF_TARGET_ORG` is not authenticated. Run `sf org login web --alias data360` again. |
-| `403 Forbidden` from Data Cloud APIs | The logged-in user doesn't have Data Cloud permissions. Assign the **Customer Data Platform Admin** permission set in Setup > Permission Sets. |
+| `403 Forbidden` from Data Cloud APIs | The logged-in user lacks permission for that Data Cloud operation. Add only the missing permission; do not grant admin access for a read-only setup. |
 | `Invalid identifier` | A name passed to a tool contained `/`, `.`, or another character that is not allowed in a URL path segment. Use the API name only. |
-| Refused to delete | Delete tools require `confirm=true` after you explicitly approve the action. |
+| Refused to change data | Update, delete, and external-routing tools require `confirm=true` after you explicitly approve the action. |
 | `query` result says truncated | The result hit `MAX_QUERY_ROWS` or `MAX_QUERY_BYTES`. Narrow the SQL or raise those limits. |
 | Tools not showing in Cursor | Click the refresh icon in Cursor MCP settings. Verify `.venv/bin/python -m mcp --version` works. |
 | `401 Unauthorized` mid-session | The CLI access token expired. Run `sf org login web --alias data360` again. |
